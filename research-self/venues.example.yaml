@@ -1,0 +1,33 @@
+default_year: 2027
+venues:
+  iclr:
+    name: ICLR
+    provider: openreview
+    type: conference
+    years: [2022, 2023, 2024, 2025, 2026, 2027]
+    venue_id_pattern: "ICLR.cc/{year}/Conference"
+  icml:
+    name: ICML
+    provider: openreview
+    type: conference
+    years: [2022, 2023, 2024, 2025, 2026, 2027]
+  neurips:
+    name: NeurIPS
+    provider: openreview
+    type: conference
+    years: [2022, 2023, 2024, 2025, 2026, 2027]
+  acl:
+    name: ACL / ARR
+    provider: openreview_arr
+    type: rolling_review
+    years: [2022, 2023, 2024, 2025, 2026, 2027]
+  cvpr:
+    name: CVPR
+    provider: openreview
+    type: conference
+    years: [2022, 2023, 2024, 2025, 2026, 2027]
+  tmlr:
+    name: TMLR
+    provider: openreview_journal
+    type: rolling_review
+    years: [2022, 2023, 2024, 2025, 2026, 2027]

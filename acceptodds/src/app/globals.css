@@ -1,0 +1,96 @@
+/*
+ * Paper Graph — "arXiv digest" style (mockup J), in Tailwind. Serif for
+ * reading, monospace for numbers, one maroon accent. The palette and fonts
+ * are the tokens below; everything else is utilities in the markup, with the
+ * few repeated patterns in `components/ui.ts`.
+ */
+@import 'tailwindcss';
+
+@theme {
+  --color-bg: #fbfaf7;
+  --color-ink: #1d1d1d;
+  --color-muted: #777;
+  --color-subtle: #666;
+  --color-faint: #888;
+  --color-rule: #ddd;
+  --color-rule-soft: #eee;
+  --color-rule-strong: #ccc;
+  --color-frame: #cfc8b8;
+  --color-highlight: #f3efe6;
+  --color-tint: #f1ede3;
+  --color-accent: #b31b1b;
+  --color-up: #1a7f37;
+  --color-down: #b31b1b;
+  --color-card: #fff;
+  /* hyperref's default box round a URL (urlbordercolor, cyan). */
+  --color-hyperref: #0ff;
+
+  --font-serif: Georgia, 'Times New Roman', serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+
+  /* The caret in an empty `CodeInput` slot. */
+  --animate-caret-blink: caret-blink 1.2s ease-out infinite;
+  /* A `SheetContent` on a phone: slides up from the bottom edge. */
+  --animate-sheet-up: sheet-up 0.25s ease-out;
+  /* `InstitutionStrip`: the doubled row slides by one copy, then repeats. Its duration is set per name there. */
+  --animate-marquee: marquee 60s linear infinite;
+  @keyframes marquee {
+    to {
+      transform: translateX(-50%);
+    }
+  }
+  @keyframes sheet-up {
+    from {
+      transform: translateY(100%);
+    }
+  }
+  @keyframes caret-blink {
+    0%,
+    70%,
+    100% {
+      opacity: 1;
+    }
+    20%,
+    50% {
+      opacity: 0;
+    }
+  }
+}
+
+@custom-variant narrow (@media (max-width: 720px));
+
+@layer base {
+  html,
+  body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+  }
+  body {
+    font: 15px/1.5 var(--font-serif);
+  }
+  /* On html, not body: KaTeX's CSS sets body's counter-reset, unlayered, and would win. */
+  html {
+    counter-reset: sec sub;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+}
+
+/* Section numbers for ui.section / ui.subsection, counted in page order. */
+@utility sec-num {
+  counter-increment: sec;
+  counter-set: sub 0;
+  &::before {
+    content: counter(sec);
+    margin-right: 0.75em;
+  }
+}
+@utility subsec-num {
+  counter-increment: sub;
+  &::before {
+    content: counter(sec) '.' counter(sub);
+    margin-right: 0.75em;
+  }
+}
