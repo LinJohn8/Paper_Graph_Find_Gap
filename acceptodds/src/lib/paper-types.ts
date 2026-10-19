@@ -47,3 +47,48 @@ export interface MinimapData {
   edges: [number, number][];
   clusters: Topic[];
 }
+
+export interface SemanticItem {
+  id: string;
+  slug: string;
+  title: string;
+  abstract: string;
+  authors: string[];
+  venues: { id: string; name: string; year: number; relation_type: string }[];
+  year: number;
+  score: number;
+}
+
+export interface SemanticResult {
+  items: SemanticItem[];
+  method: string;
+  note: string | null;
+  query: string;
+}
+
+export interface GapPaper {
+  id: string;
+  title: string;
+  abstract: string;
+}
+
+export interface Gap {
+  type: 'bridge' | 'sparse' | 'cue';
+  title: string;
+  explanation: string;
+  score: number;
+  paper_ids: string[];
+  papers: GapPaper[];
+}
+
+export interface TopicSummary {
+  number: number;
+  label: string;
+  size: number;
+  top_terms: string[];
+}
+
+export interface GapsResult {
+  gaps: Gap[];
+  topics: TopicSummary[];
+}

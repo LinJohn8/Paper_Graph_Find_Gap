@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { load } from '@/lib/paper-api';
 import { PaperMapView } from '@/components/map/PaperMapView';
+import { parseYearInfo, resolveYear, yearOptions } from '@/lib/years';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Paper map | Paper Graph' };
@@ -11,6 +12,9 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
   const sp = await searchParams;
   const kind = first(sp.venue) ?? first(sp.kind) ?? 'all';
   const registry = await load('/api/venues');
+  // Use the backend's real default year rather than a literal that has no data.
+  const info = parseYearInfo(registry);
+  const year = resolveYear(first(sp.year) ?? undefined, info);
   return (
     <main>
       <form action="/map" className="flex gap-3 px-6 py-3">
@@ -31,23 +35,18 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
         </label>
         <label>
           Year{' '}
-          <input
-            name="year"
-            type="number"
-            min="1900"
-            max="2100"
-            defaultValue={first(sp.year) ?? 2027}
-            className="w-24 border border-rule"
-          />
+          <select name="year" defaultValue={String(year)} className="border border-rule">
+            {yearOptions(info, year).map((y) => (
+              <option key={y} value={y}>
+                {y}
+                {info?.availableYears.includes(y) ? '' : ' (no data)'}
+              </option>
+            ))}
+          </select>
         </label>
         <button type="submit">Apply</button>
       </form>
-      <PaperMapView
-        key={`${kind}-${first(sp.year) ?? '2027'}`}
-        kind={kind}
-        year={Number(first(sp.year) ?? 2027)}
-        initialPaper={first(sp.paper)}
-      />
+      <PaperMapView key={`${kind}-${year}`} kind={kind} year={year} initialPaper={first(sp.paper)} />
     </main>
   );
 }

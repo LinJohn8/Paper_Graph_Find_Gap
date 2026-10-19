@@ -35,7 +35,17 @@ type MinimapView = MinimapData;
  * window (`GET /listings/{slug}/minimap`, public and cached). A reader who
  * never scrolls to it, and a crawler, costs the server nothing.
  */
-export function Minimap({ slug, figure, year = 2027 }: { slug: string; figure: number; year?: number }) {
+export function Minimap({
+  slug,
+  figure,
+  // The paper page passes the real venue year; this fallback is only a guard for
+  // callers that omit it (never the old hardcoded placeholder year).
+  year = new Date().getFullYear(),
+}: {
+  slug: string;
+  figure: number;
+  year?: number;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
   useEffect(() => {

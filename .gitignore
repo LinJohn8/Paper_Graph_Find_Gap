@@ -18,3 +18,7 @@ Data/
 research-self/.venv/
 research-self/*.egg-info/
 research-self/**/__pycache__/
+# Ad-hoc repair/audit scripts and their reports (kept locally; curated output lives in
+# DATA_COVERAGE_REPAIR_REPORT.md and docs/).
+research-self/_*
+.pytest_cache/

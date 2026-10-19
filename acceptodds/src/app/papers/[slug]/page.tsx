@@ -50,6 +50,26 @@ export default async function PaperPage({ params }: { params: Promise<{ slug: st
           {paper.abstract || 'Abstract not provided by the source.'}
         </p>
       </section>
+      {paper.rqs?.length > 0 && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl">Research questions (extracted)</h2>
+          <ul className="mt-2 list-disc space-y-2 pl-5 text-sm leading-relaxed">
+            {paper.rqs.map((rq: string, i: number) => (
+              <li key={i}>{rq}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {paper.gap_cues?.length > 0 && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl">Stated gaps</h2>
+          <ul className="mt-2 list-disc space-y-2 pl-5 text-sm leading-relaxed">
+            {paper.gap_cues.map((cue: string, i: number) => (
+              <li key={i}>{cue}</li>
+            ))}
+          </ul>
+        </section>
+      )}
       <section className="mt-8">
         <h2 className="font-serif text-xl">Public reviews and decisions</h2>
         {paper.reviews.length ? (
@@ -69,7 +89,11 @@ export default async function PaperPage({ params }: { params: Promise<{ slug: st
       </section>
       <section className="mt-8">
         <h2 className="font-serif text-xl">Paper map</h2>
-        <Minimap slug={paper.id} figure={1} year={paper.venues[0]?.year ?? 2027} />
+        <Minimap
+          slug={paper.id}
+          figure={1}
+          year={paper.venues[0]?.year ?? paper.publication_year ?? new Date().getFullYear()}
+        />
       </section>
     </main>
   );

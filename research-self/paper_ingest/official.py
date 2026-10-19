@@ -2,7 +2,11 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
+import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin, urlparse, parse_qs
 import httpx
 from bs4 import BeautifulSoup
@@ -11,30 +15,106 @@ from . import db
 PROVIDERS={'icml':'pmlr','acl':'acl_anthology','cvpr':'cvf','neurips':'neurips_proceedings'}
 NAMES={'icml':'ICML','acl':'ACL','cvpr':'CVPR','neurips':'NeurIPS'}
 
+#: Detail pages are network bound; one-at-a-time is far too slow for a 3-6k
+#: paper proceedings year. A small pool keeps a single venue polite.
+DEFAULT_WORKERS=int(os.environ.get('PAPER_HTTP_WORKERS','8') or 8)
+
 
 class PublicSource:
+    """Cached HTTP source for one publisher's venue-year directory.
+
+    Clients are per-thread. Detail-page enrichment fans out over a thread pool,
+    and a pooled ``httpx.Client`` shared between threads serialises on one
+    connection pool and lets one thread's dead socket poison every other thread.
+    Each thread lazily creates (and can rebuild) its own client instead.
+    """
+
     def __init__(self, provider, venue, year):
         self.root=db.DATA_ROOT/'raw'/provider/venue/str(year)
-        self.client=httpx.Client(timeout=35,follow_redirects=True,headers={'User-Agent':'PaperGraph/0.1 public research metadata'})
+        self._local=threading.local()
+        self._clients=[]
+        self._clients_lock=threading.Lock()
+
+    def _new_client(self):
+        client=httpx.Client(timeout=35,follow_redirects=True,
+                            headers={'User-Agent':'PaperGraph/0.1 public research metadata'})
+        with self._clients_lock:
+            self._clients.append(client)
+        return client
+
+    @property
+    def client(self):
+        client=getattr(self._local,'client',None)
+        if client is None:
+            client=self._new_client()
+            self._local.client=client
+        return client
+
+    def close(self):
+        """Close every client this source created, on every thread."""
+        with self._clients_lock:
+            clients,self._clients=self._clients,[]
+        for client in clients:
+            try:
+                client.close()
+            except Exception:
+                pass
+        self._local.client=None
+
+    def _fresh_client(self):
+        """Replace this thread's pooled client after a transport failure.
+
+        A dropped keep-alive connection (httpx raises ``RemoteProtocolError``, a
+        ``TransportError``) poisons the pool: every subsequent request on the same
+        client fails the same way. Rebuilding the client is what lets the retry
+        actually succeed instead of burning all attempts on a dead socket.
+        """
+        client=getattr(self._local,'client',None)
+        self._local.client=None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+            with self._clients_lock:
+                try:
+                    self._clients.remove(client)
+                except ValueError:
+                    pass
 
     def get(self,url):
         self.root.mkdir(parents=True,exist_ok=True)
         path=self.root/(hashlib.sha256(url.encode()).hexdigest()+'.html')
         # Cached snapshots allow resuming large metadata batches without refetching.
         if path.exists(): return BeautifulSoup(path.read_text(encoding='utf-8'),'html.parser'),str(path)
-        for attempt in range(3):
+        # More than 3 attempts: a single proceedings year is thousands of detail
+        # pages, and under concurrent load a connection drops often enough that
+        # 3 tries is not enough to finish the year. Observed: ACL 2023 ended
+        # `failed` after 812 papers on `ConnectError: [WinError 10054]`.
+        for attempt in range(6):
             try:
                 response=self.client.get(url)
                 if response.status_code==429 or response.status_code>=500:
-                    if attempt<2: time.sleep(2**attempt);continue
+                    if attempt<5: time.sleep(min(2**attempt,30));continue
                 response.raise_for_status()
                 response.encoding='utf-8'
                 path.write_text(response.text,encoding='utf-8')
                 path.with_suffix('.json').write_text(json.dumps({'url':url,'retrieved_at':db.now(),'status':response.status_code}),encoding='utf-8')
                 return BeautifulSoup(response.text,'html.parser'),str(path)
-            except (httpx.TimeoutException,httpx.NetworkError):
-                if attempt==2:raise
-                time.sleep(2**attempt)
+            except (httpx.TimeoutException,httpx.TransportError) as exc:
+                # TransportError covers RemoteProtocolError (a keep-alive drop),
+                # ReadError, ConnectError and NetworkError. Catching only
+                # NetworkError let a dropped connection abort a whole year's
+                # harvest after a handful of papers -- observed on the ACL
+                # Anthology, which closes keep-alive after ~6 requests.
+                #
+                # Both RemoteProtocolError and ConnectError (WinError 10054) mean
+                # the pooled connection is dead, so rebuild it before retrying;
+                # otherwise every attempt fails on the same poisoned socket.
+                if isinstance(exc, (httpx.RemoteProtocolError, httpx.ConnectError)):
+                    self._fresh_client()
+                if attempt==5:raise
+                time.sleep(min(2**attempt,30))
         raise RuntimeError('request retries exhausted')
 
 
@@ -54,11 +134,29 @@ def discover(source,venue,year):
     if venue=='icml':
         base='https://proceedings.mlr.press/'
         soup,_=source.get(base)
+        # The PMLR index lists workshop volumes *before* the main conference, so a
+        # naive "first entry mentioning ICML <year>" match silently returns a
+        # workshop instead of the main proceedings. The shipped code keyed only on
+        # "workshop vs main" with a word-boundary regex, which classified
+        # "Proceedings of ICML 2022 Workshop on Healthcare AI and COVID-19" (v184)
+        # as a main volume; v184 sorts before the real main volume v162, so ICML
+        # 2022 imported 14 workshop papers instead of 1,233. Require the whole
+        # label to BE "Proceedings of ICML <year>".
+        matches=[]
+        main_re=re.compile(rf'^Proceedings of ICML {year}$')
         for li in soup.select('li'):
             text=li.get_text(' ',strip=True)
-            if f'ICML {year}' in text and li.find('a'):
-                url=urljoin(base,li.find('a')['href'].rstrip('/')+'/')
-                return url,None
+            if f'ICML {year}' not in text or not li.find('a'):
+                continue
+            href=li.find('a')['href'].rstrip('/')+'/'
+            # The <li> reads "Volume 162 Proceedings of ICML 2022"; workshop rows
+            # read "Volume 184 Proceedings of <Workshop> at ICML 2022".
+            label=re.sub(r'^Volume \d+\s*','',text).strip()
+            is_main = main_re.match(label) is not None or label==f'ICML {year} Proceedings'
+            matches.append((0 if is_main else 1, href, label))
+        if matches:
+            matches.sort(key=lambda m:(m[0],m[1]))
+            return urljoin(base,matches[0][1]),None
         raise LookupError(f'No ICML {year} volume listed in official PMLR index')
     urls={'acl':f'https://aclanthology.org/events/acl-{year}/','cvpr':f'https://openaccess.thecvf.com/CVPR{year}?day=all','neurips':f'https://proceedings.neurips.cc/paper_files/paper/{year}'}
     return urls[venue],None
@@ -94,7 +192,15 @@ def enrich(source,venue,paper):
     for m in soup.select('meta[name][content]'):
         meta.setdefault(m['name'].lower(),[]).append(m['content'])
     for key,field in [('citation_title','title'),('citation_pdf_url','pdf_url'),('citation_doi','doi')]:
-        if meta.get(key):paper[field]=meta[key][0]
+        if meta.get(key):
+            # PMLR emits citation_title with UNESCAPED double quotes, e.g.
+            # content="On the "Induction Bias" in Sequence Models"; BeautifulSoup
+            # then parses the content as `On the ` and the index title (correct,
+            # complete) was overwritten by the truncated fragment. Only accept a
+            # meta title when it is strictly longer than the index title.
+            if key=='citation_title' and len(meta[key][0])<=len(paper.get(field) or ''):
+                continue
+            paper[field]=meta[key][0]
     if meta.get('citation_author'):paper['authors']=meta['citation_author']
     selectors={'icml':'#abstract','acl':'.acl-abstract','cvpr':'#abstract','neurips':'.abstract'}
     abstract=soup.select_one(selectors[venue])
@@ -106,7 +212,89 @@ def enrich(source,venue,paper):
     return paper
 
 
-def sync_official(venue,year,limit=None,dry_run=False):
+def _normalize_title_key(title: str | None) -> str:
+    """Comparison key for cross-source title matching.
+
+    Sources differ in punctuation, capitalisation and LaTeX, so an exact match
+    misses most twins. Lowercasing and dropping non-alphanumerics catches
+    "DeBayes: a Bayesian Method" vs "DeBayes - A Bayesian Method".
+    """
+    if not title:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", title.lower())
+
+
+def _find_existing_for_official(con, venue: str, year: int, paper: dict):
+    """Find a paper already stored from a different source for this venue-year.
+
+    The official adapters used to check only ``(provider, paper_url)``, so a paper
+    previously imported from Crossref/arXiv was inserted AGAIN under the official
+    id. On real data that produced ~37% duplicate rows (cvpr 2023: 1452 duplicate
+    rows out of 3849) and inflated every corpus count.
+
+    Matching is by normalized title within the same venue-year (titles are stable
+    across sources; DOIs often are not, because proceedings records frequently
+    lack one until enrichment). Returns the existing row or ``None``.
+    """
+    key = _normalize_title_key(paper.get("title"))
+    if len(key) < 20:
+        # Too short to be a reliable identity; a false merge would be worse than
+        # a duplicate, so fall through to insertion.
+        return None
+    rows = con.execute(
+        """SELECT p.* FROM papers p
+           JOIN paper_venues pv ON pv.paper_id=p.id
+           WHERE pv.venue_id=? AND pv.year=?""",
+        (venue, year),
+    ).fetchall()
+    for row in rows:
+        if _normalize_title_key(row["title"]) == key:
+            return row
+    return None
+
+
+def _preload_title_index(con, venue: str, year: int) -> dict:
+    """Normalized title -> stored row for one venue-year, loaded once.
+
+    The old ``_find_existing_for_official`` re-read every row of the venue-year
+    for every paper (O(n^2): a 5,887-paper NeurIPS year meant ~35M row reads).
+    One dict load makes the whole import O(n).
+    """
+    index: dict = {}
+    for row in con.execute(
+        """SELECT p.* FROM papers p
+           JOIN paper_venues pv ON pv.paper_id=p.id
+           WHERE pv.venue_id=? AND pv.year=?""",
+        (venue, year),
+    ):
+        index.setdefault(_normalize_title_key(row["title"]), row)
+    return index
+
+
+def _enrich_many(source, venue: str, papers: list, workers: int) -> int:
+    """Fetch every paper's detail page concurrently; return the failure count.
+
+    One dead detail page (genuine 404s exist in CVPR 2022) used to abort the whole
+    year after 97 papers. A page that cannot be fetched now costs only its own
+    abstract, and the pool is what makes a 3-6k-paper year finish in minutes.
+    """
+    errors = 0
+    lock = threading.Lock()
+
+    def work(paper):
+        nonlocal errors
+        try:
+            enrich(source, venue, paper)
+        except Exception:  # noqa: BLE001 - one page must never kill the year
+            with lock:
+                errors += 1
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        list(pool.map(work, papers))
+    return errors
+
+
+def sync_official(venue,year,limit=None,dry_run=False,workers=None):
     provider=PROVIDERS[venue]; started=db.now()
     counts={'fetched_count':0,'inserted_count':0,'updated_count':0,'skipped_count':0,'error_count':0}
     source=PublicSource(provider,venue,year)
@@ -119,20 +307,33 @@ def sync_official(venue,year,limit=None,dry_run=False):
         url,raw,papers=index_records(source,venue,year)
         if not papers:raise RuntimeError('Source responded, but no paper records parsed; not assumed empty')
         selected=papers[:limit] if limit else papers
-        for paper in selected:
-            # Keep the entire PMLR index import cheap; detail enrichment is bounded
-            # on a small run. Subsequent runs can enrich any missing paper fields.
-            if limit or venue!='icml':enrich(source,venue,paper)
-            paper.setdefault('raw_data_path',raw)
-            identifier=urlparse(paper['paper_url']).path.strip('/').removesuffix('.html')
-            paper.update(id=f'{provider}:{identifier}',source=provider,source_paper_id=identifier,publication_year=year,status='published')
-            counts['fetched_count']+=1
-            if dry_run:continue
-            with db.connect() as con:
-                db.put_venue(con,venue_id=venue,name=NAMES[venue],year=year,provider=provider,source_venue_id=url,kind='conference',source_url=url,availability='available')
-                # Preserve the sole legacy PMLR record via its exact original URL,
-                # not by fuzzy title matching or its former unstable index ID.
-                existing=con.execute('SELECT * FROM papers WHERE source=? AND paper_url=?',(provider,paper['paper_url'])).fetchone()
+        # Detail-page enrichment is on by default: without abstracts the semantic
+        # search/gap features have nothing to work on (measured: icml 2023 landed
+        # with 0% abstract coverage). PAPER_SKIP_ENRICH=1 keeps the fast
+        # index-only path for a separate, resumable enrich pass.
+        skip_enrich = os.environ.get('PAPER_SKIP_ENRICH','').strip() in ('1','true','yes')
+        if not skip_enrich:
+            counts['error_count'] += _enrich_many(source, venue, selected, workers or DEFAULT_WORKERS)
+        con=None
+        if not dry_run:
+            con=db.connect()
+            db.put_venue(con,venue_id=venue,name=NAMES[venue],year=year,provider=provider,source_venue_id=url,kind='conference',source_url=url,availability='available')
+            index=_preload_title_index(con,venue,year)
+        try:
+            for position,paper in enumerate(selected):
+                paper.setdefault('raw_data_path',raw)
+                identifier=urlparse(paper['paper_url']).path.strip('/').removesuffix('.html')
+                paper.update(id=f'{provider}:{identifier}',source=provider,source_paper_id=identifier,publication_year=year,status='published')
+                counts['fetched_count']+=1
+                if dry_run:continue
+                # Cross-source dedup. A previous harvester (Crossref/arXiv) may
+                # already hold this exact paper under a different id scheme;
+                # without this check the corpus double-counted every paper that
+                # was imported twice (measured 37% duplicate rows on cvpr 2023/24).
+                title_key=_normalize_title_key(paper['title'])
+                existing=index.get(title_key) if len(title_key)>=20 else None
+                if existing is None:
+                    existing=con.execute('SELECT * FROM papers WHERE source=? AND paper_url=?',(provider,paper['paper_url'])).fetchone()
                 if existing:
                     paper['id']=existing['id'];paper['source_paper_id']=existing['source_paper_id']
                     for k in ('abstract','pdf_url','doi','forum_id','primary_area'):
@@ -145,12 +346,21 @@ def sync_official(venue,year,limit=None,dry_run=False):
                         continue
                 db.upsert_paper(con,paper,venue,year,relation_type='publication')
                 counts['updated_count' if existing else 'inserted_count']+=1
+                if len(title_key)>=20:
+                    index.setdefault(title_key,con.execute('SELECT * FROM papers WHERE id=?',(paper['id'],)).fetchone())
+                # Commit in batches: one transaction for a whole 6k-paper year
+                # holds the write lock for minutes and blocks every other venue.
+                if position%200==199:
+                    con.commit()
+            if con is not None:con.commit()
+        finally:
+            if con is not None:con.close()
         status='partial' if limit and len(papers)>limit else 'success'
     except Exception as exc:
         error=f'{type(exc).__name__}: {exc}';counts['error_count']+=1
         status='not_open' if isinstance(exc,LookupError) or (isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code==404) else ('restricted' if isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code in (401,403) else 'failed')
     finally:
-        source.client.close()
+        source.close()
         if not dry_run:
             with db.connect() as con:
                 if not con.execute('SELECT 1 FROM venues WHERE id=? AND year=?',(venue,year)).fetchone():
@@ -162,38 +372,74 @@ def sync_official(venue,year,limit=None,dry_run=False):
 
 def sync_pmlr_icml(year,limit=None):return sync_official('icml',year,limit)
 
-def enrich_missing_abstracts(venue: str, year: int, limit: int | None = None) -> dict:
+def enrich_missing_abstracts(venue: str, year: int, limit: int | None = None,
+                             workers: int | None = None) -> dict:
     """Fill only empty abstracts from cached/official detail pages.
 
-    This is deliberately separate from index synchronization so large proceedings
-    imports remain cheap and can be enriched in resumable batches.
+    Deliberately separate from index synchronization so a large index import
+    stays cheap; enrichment is resumable and can run concurrently with other
+    venue-years. Fetches are parallel (network bound); DB writes stay serial on
+    one connection so a 6k-paper pass does not open 6k SQLite connections.
     """
     provider = PROVIDERS[venue]
     source = PublicSource(provider, venue, year)
-    db.init_db(); updated = skipped = errors = 0
-    try:
-        with db.connect() as con:
-            rows = con.execute("""SELECT p.id,p.paper_url FROM papers p
-              JOIN paper_venues pv ON pv.paper_id=p.id
-              WHERE pv.venue_id=? AND pv.year=? AND (p.abstract IS NULL OR trim(p.abstract)='')
-              ORDER BY p.id LIMIT ?""", (venue, year, limit or -1)).fetchall()
-        for row in rows:
-            try:
-                paper = {'paper_url': row['paper_url']}
-                enrich(source, venue, paper)
-                abstract = (paper.get('abstract') or '').strip()
-                if not abstract:
-                    skipped += 1; continue
-                with db.connect() as con:
-                    con.execute("UPDATE papers SET abstract=?,updated_at_source=?,last_seen_at=? WHERE id=? AND (abstract IS NULL OR trim(abstract)='')",
-                                (abstract, db.now(), db.now(), row['id']))
-                    con.execute("DELETE FROM papers_fts WHERE paper_id=?", (row['id'],))
-                    p = con.execute("SELECT * FROM papers WHERE id=?", (row['id'],)).fetchone()
-                    con.execute("INSERT INTO papers_fts(paper_id,title,abstract,authors,keywords,venue) VALUES(?,?,?,?,?,?)",
-                                (row['id'],p['title'],abstract,p['authors_json'],p['keywords_json'],venue))
-                updated += 1
-            except Exception:
+    db.init_db()
+    with db.connect() as con:
+        # Only enrich rows that actually came from *this* publisher's index.
+        #
+        # The old query took any abstract-less row for the venue-year ordered by
+        # id, but ids are namespaced ('crossref:...', 'cvf:...', 'arxiv:...') so
+        # 'crossref:' sorted first and every batch was spent on Crossref doi.org
+        # landing pages with no abstract (measured: 0 updates / 99 wasted fetches
+        # in a 100-row batch). Filtering on the official source makes yield ~100%.
+        rows = con.execute("""SELECT p.id,p.paper_url FROM papers p
+          JOIN paper_venues pv ON pv.paper_id=p.id
+          WHERE pv.venue_id=? AND pv.year=? AND (p.abstract IS NULL OR trim(p.abstract)='')
+            AND p.source=?
+          ORDER BY p.id LIMIT ?""", (venue, year, provider, limit or -1)).fetchall()
+    found: list[tuple[str, str]] = []
+    skipped = 0
+    errors = 0
+    lock = threading.Lock()
+
+    def work(row):
+        nonlocal skipped, errors
+        try:
+            paper = {'paper_url': row['paper_url']}
+            enrich(source, venue, paper)
+            abstract = (paper.get('abstract') or '').strip()
+            if not abstract:
+                with lock:
+                    skipped += 1
+                return
+            with lock:
+                found.append((row['id'], abstract))
+        except Exception:  # noqa: BLE001 - one page must not stop the batch
+            with lock:
                 errors += 1
+
+    if rows:
+        with ThreadPoolExecutor(max_workers=max(1, int(workers or DEFAULT_WORKERS))) as pool:
+            list(pool.map(work, rows))
+
+    updated = 0
+    con = db.connect()
+    try:
+        for position, (paper_id, abstract) in enumerate(found):
+            con.execute("UPDATE papers SET abstract=?,updated_at_source=?,last_seen_at=? WHERE id=? AND (abstract IS NULL OR trim(abstract)='')",
+                        (abstract, db.now(), db.now(), paper_id))
+            # Rowid-keyed FTS maintenance (see db._align_fts_rowids): deleting by
+            # the UNINDEXED paper_id scans the whole FTS table (135 ms/row).
+            p = con.execute("SELECT rowid,* FROM papers WHERE id=?", (paper_id,)).fetchone()
+            if p is not None:
+                con.execute("INSERT OR REPLACE INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue) VALUES(?,?,?,?,?,?,?)",
+                            (p['rowid'], paper_id, p['title'], abstract, p['authors_json'], p['keywords_json'], venue))
+                updated += 1
+            if position % 200 == 199:
+                con.commit()
+        con.commit()
     finally:
-        source.client.close()
-    return {'venue': venue, 'year': year, 'examined': len(rows), 'updated': updated, 'skipped': skipped, 'errors': errors}
+        con.close()
+        source.close()
+    return {'venue': venue, 'year': year, 'examined': len(rows), 'updated': updated,
+            'skipped': skipped, 'errors': errors}

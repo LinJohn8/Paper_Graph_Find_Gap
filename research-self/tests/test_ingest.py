@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from paper_ingest import db
+from paper_ingest import db, years
 from paper_ingest.api import app
 from paper_ingest.openreview import normalize
 from paper_ingest.service import list_papers
@@ -42,5 +42,12 @@ def test_api_venues_and_paper_search(tmp_path,monkeypatch):
     with TestClient(app) as client:
         venues=client.get("/api/venues").json()
         assert {v["id"] for v in venues["items"]}=={"iclr","neurips","icml","acl","cvpr","tmlr"}
-        assert venues["default_year"]==2027
+        # `default_year` used to be the literal 2027 (a placeholder with no data).
+        # It is now derived from the corpus: the newest year that has papers, or
+        # the current calendar year when the database is empty. This fixture has
+        # no papers and no PAPER_DEFAULT_YEAR override, so it must be the calendar
+        # year - never a hardcoded future year.
+        assert venues["default_year"] == years.current_year()
+        assert venues["default_year"] != 2027 or years.current_year() == 2027
+        assert isinstance(venues["available_years"], list)
         assert client.get("/api/health").status_code==200

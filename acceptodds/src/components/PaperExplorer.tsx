@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { yearOptions, type YearInfo } from '@/lib/years';
 
 type Item = {
   id: string;
@@ -27,6 +28,7 @@ async function load(path: string) {
 export async function PaperExplorer({
   venue,
   year,
+  yearInfo,
   keyword,
   page,
   status,
@@ -34,6 +36,7 @@ export async function PaperExplorer({
 }: {
   venue: string;
   year: number;
+  yearInfo?: YearInfo | null;
   keyword: string;
   page: number;
   status: string;
@@ -83,15 +86,21 @@ export async function PaperExplorer({
               </option>
             ))}
         </select>
-        <input
+        {/* Offer the years the backend actually has, instead of a bare number box
+            that defaults to a year with no data. */}
+        <select
           aria-label="Year"
           className="border border-frame bg-card px-3 py-2"
           name="year"
-          type="number"
-          min="1900"
-          max="2200"
-          defaultValue={year}
-        />
+          defaultValue={String(year)}
+        >
+          {yearOptions(yearInfo, year).map((y) => (
+            <option key={y} value={y}>
+              {y}
+              {yearInfo?.availableYears.includes(y) ? '' : ' (no data)'}
+            </option>
+          ))}
+        </select>
         <select
           aria-label="Status"
           name="status"

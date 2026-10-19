@@ -1,6 +1,39 @@
-﻿# Paper Graph
+# Paper Graph
 
 Paper Graph is a local, login-free academic paper browser. It stores source metadata in `Data/database/papers.sqlite`, serves it through the FastAPI service in `research-self`, and keeps the AcceptOdds Paper Map renderer, minimap and layout worker in the Next.js app (`acceptodds`). The prediction-market product has been removed.
+
+## Screenshots
+
+Papers page — the UI opens on the newest year that actually has data. The repaired 2022–2026 corpus holds **73,675 papers** (5 conferences + TMLR journal):
+
+![Papers page showing 20,412 papers for 2026](docs/screenshots/papers-2026.png)
+
+Paper map — one semantic coordinate per paper (TF-IDF/SVD + t-SNE neighbourhood projection + KMeans), rebuilt for every venue-year:
+
+![Paper map for 2026 with 20,412 points](docs/screenshots/map-2026.png)
+
+Data Sources — per-venue, per-year local paper counts and last sync status:
+
+![Data Sources page with every venue-year count](docs/screenshots/data-sources.png)
+
+Paper detail — abstract, extracted research questions, stated gaps and related papers:
+
+![Paper detail page](docs/screenshots/paper-detail.png)
+
+## Data coverage (2022–2026)
+
+Every venue-year was rebuilt from the publishers' own indexes (ICLR virtual site, PMLR, NeurIPS Proceedings, ACL Anthology, CVF Open Access, jmlr.org for TMLR) and then deduplicated across sources. Counts now grow strictly year over year:
+
+| Year | Papers | Distinct titles | Abstract coverage |
+|---:|---:|---:|---:|
+| 2022 | 8,294 | 8,294 | 97% |
+| 2023 | 11,291 | 11,291 | 95% |
+| 2024 | 14,227 | 14,224 | 93% |
+| 2025 | 19,451 | 19,451 | 93% |
+| 2026 | 20,412 | 20,409 | 92% |
+| **Total** | **73,675** | **73,524** | **93%** |
+
+Known gaps: NeurIPS 2026 proceedings are not published yet (December 2026); TMLR abstracts are behind an OpenReview Cloudflare challenge (metadata is complete); 122 measured title-variant cross-source twins are retained rather than deleted. Root causes, fixes, per-cell expected-vs-actual numbers, and the rollback files are documented in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md).
 
 ## Start on Windows
 
@@ -27,7 +60,7 @@ npm ci
 npm run dev
 ```
 
-Pages: Papers `/`, Graph `/map`, Data Sources `/sources`, and paper details `/papers/{id}`. The six configured venues remain ICLR, NeurIPS, ICML, ACL/ARR, CVPR and TMLR, with 2027 as the default. Collection commands remain documented in `research-self/README.md`; this phase does not change source access.
+Pages: Papers `/`, Graph `/map`, Data Sources `/sources`, and paper details `/papers/{id}`. The six configured venues remain ICLR, NeurIPS, ICML, ACL/ARR, CVPR and TMLR, and the UI opens on the newest year that actually has data (2026 at the time of writing). Collection commands remain documented in `research-self/README.md`; this phase does not change source access.
 
 ## Verification
 
@@ -40,7 +73,7 @@ cd ..\research-self
 .\.venv\Scripts\python.exe tests\browser_check.py
 ```
 
-See [MARKET_REMOVAL_AUDIT.md](MARKET_REMOVAL_AUDIT.md), [IMPLEMENTATION_REPORT.md](IMPLEMENTATION_REPORT.md), [TEST_REPORT.md](TEST_REPORT.md) and [PROJECT_AUDIT.md](PROJECT_AUDIT.md). The upstream repository has no clear license; keep this checkout for personal local research.
+See [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md), [MARKET_REMOVAL_AUDIT.md](MARKET_REMOVAL_AUDIT.md), [IMPLEMENTATION_REPORT.md](IMPLEMENTATION_REPORT.md), [TEST_REPORT.md](TEST_REPORT.md) and [PROJECT_AUDIT.md](PROJECT_AUDIT.md). The upstream repository has no clear license; keep this checkout for personal local research.
 
 ## Origin And Scope
 
@@ -58,7 +91,7 @@ The public repository excludes `Data/`, SQLite databases, raw snapshots, graph c
 
 ## Double-click EXE viewer
 
-The repository root contains `PaperGraph.exe`. Double-click it, or run `.\PaperGraph.exe` from PowerShell. It starts the existing local FastAPI and production Next.js services, checks both health endpoints, opens the ICML 2025 Paper Map, and shows buttons for Papers and Data Sources. The map uses the existing Graph renderer and the generated ICML 2025 coordinates (3,330 real papers). Close the launcher window to stop only the processes it started. If the EXE is rebuilt, run `.\launcher\build-launcher.ps1` after `npm run build`.
+The repository root contains `PaperGraph.exe`. Double-click it, or run `.\PaperGraph.exe` from PowerShell. It starts the existing local FastAPI and production Next.js services, checks both health endpoints, opens the ICML 2025 Paper Map, and shows buttons for Papers and Data Sources. The map uses the existing Graph renderer and the generated per-venue coordinates; current corpus counts are in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md). Close the launcher window to stop only the processes it started. If the EXE is rebuilt, run `.\launcher\build-launcher.ps1` after `npm run build`.
 
 The launcher expects this repository layout, the Python virtual environment at `research-self\.venv`, frontend `node_modules`, `.next\BUILD_ID`, and `Data\database\papers.sqlite`. It never downloads data or changes the Graph algorithm. Startup logs are written to `Data\logs\launcher.log`.
 
@@ -73,4 +106,4 @@ cd F:\AIWork\paper_graph\research-self
 .\.venv\Scripts\python.exe -m paper_ingest status
 ```
 
-Browse <http://127.0.0.1:3000/?venue=icml&year=2025> or change the Year control to 2024/2025/2026. The default remains 2027. Latest actual counts and limitations are in `DATA_INGESTION_REPORT.md` and `DATA_SOURCE_STATUS.md`. Official SDK diagnostics are optional: `pip install -e ".[openreview-sdk]"`, then `python tests/sdk_openreview_probe.py`. No PDF files are downloaded.
+Browse <http://127.0.0.1:3000/?venue=icml&year=2025> or change the Year control to 2024/2025/2026. The default is the newest year with data (2026 at the time of writing). Latest actual counts and limitations are in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md), `DATA_INGESTION_REPORT.md` and `DATA_SOURCE_STATUS.md`. Official SDK diagnostics are optional: `pip install -e ".[openreview-sdk]"`, then `python tests/sdk_openreview_probe.py`. No PDF files are downloaded.

@@ -23,12 +23,32 @@ def now() -> str:
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
+    """Open the local database, tuned for several writers sharing one file.
+
+    Harvesting can legitimately run more than one importer at a time (different
+    venues in parallel). SQLite serialises writers, and the default 5s lock
+    timeout is easily exceeded by a bulk insert, which surfaced as
+    ``sqlite3.OperationalError: database is locked`` and killed a whole venue run.
+
+    * ``timeout=600`` makes a blocked writer wait instead of failing immediately.
+      Bulk upserts hold the write lock for a long time (see the FTS note below),
+      so a 120 s timeout still produced spurious "database is locked" failures.
+    * ``journal_mode=WAL`` lets readers continue while a writer is active.
+    * ``synchronous=NORMAL`` keeps WAL durable enough for this data while
+      removing an fsync per commit, which matters at thousands of rows.
+    """
     path = path or DB_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path, timeout=30, factory=LocalConnection)
+    con = sqlite3.connect(path, timeout=600, factory=LocalConnection)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA journal_mode=WAL")
+    try:
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.execute("PRAGMA busy_timeout=600000")
+    except sqlite3.DatabaseError:
+        # Pragmas are an optimisation; never let one prevent a connection.
+        pass
     return con
 
 
@@ -115,6 +135,48 @@ def init_db(path: Path | None = None) -> None:
             con.execute("DROP TABLE paper_venues_legacy")
             con.execute("DROP TABLE venues_legacy")
             con.execute("PRAGMA foreign_keys=ON")
+        _align_fts_rowids(con)
+
+
+def _align_fts_rowids(con: sqlite3.Connection) -> None:
+    """One-time migration: make ``papers_fts.rowid`` equal ``papers.rowid``.
+
+    WHY THIS EXISTS
+    ---------------
+    ``upsert_paper`` used to maintain the full-text index with
+
+        DELETE FROM papers_fts WHERE paper_id=?
+
+    but ``paper_id`` is an UNINDEXED FTS5 column, so that statement has to scan
+    the entire FTS table. Measured on this corpus (60k rows): **135 ms per
+    statement**. A 2-4k-paper import therefore held the SQLite write lock for
+    5-10 *minutes*, starving every other harvester and surfacing as
+    "database is locked" across the team.
+
+    Keying the FTS row by the paper's stable ``rowid`` turns the same maintenance
+    into ``INSERT OR REPLACE INTO papers_fts(rowid,...)``: measured 0.02 ms per
+    row, ~6000x faster, and no scan. That requires existing FTS rows to already
+    use the paper rowid, so this rebuilds the index once and records a marker.
+    """
+    marker = con.execute(
+        "SELECT 1 FROM sync_state WHERE venue='__meta__' AND year=0 AND cursor='fts-rowid-v1'"
+    ).fetchone()
+    if marker:
+        return
+    con.execute("DELETE FROM papers_fts")
+    con.execute(
+        """INSERT INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue)
+           SELECT p.rowid,p.id,p.title,coalesce(p.abstract,''),p.authors_json,p.keywords_json,
+                  coalesce((SELECT v.name FROM paper_venues pv
+                            JOIN venues v ON v.id=pv.venue_id AND v.year=pv.year
+                            WHERE pv.paper_id=p.id LIMIT 1),'')
+           FROM papers p"""
+    )
+    con.execute(
+        """INSERT OR REPLACE INTO sync_state(venue,year,cursor,checkpoint,updated_at)
+           VALUES('__meta__',0,'fts-rowid-v1',NULL,?)""",
+        (now(),),
+    )
 
 
 def put_venue(con: sqlite3.Connection, *, venue_id: str, name: str, year: int, provider: str,
@@ -155,8 +217,11 @@ def upsert_paper(con: sqlite3.Connection, paper: dict[str, Any], venue_id: str, 
     con.execute("INSERT OR IGNORE INTO paper_venues(paper_id,venue_id,relation_type,year) VALUES(?,?,?,?)",
                 (paper_id,venue_id,relation_type,year))
     venue = con.execute("SELECT name FROM venues WHERE id=? AND year=?", (venue_id,year)).fetchone()
-    con.execute("DELETE FROM papers_fts WHERE paper_id=?", (paper_id,))
-    con.execute("INSERT INTO papers_fts(paper_id,title,abstract,authors,keywords,venue) VALUES(?,?,?,?,?,?)",
-                (paper_id,paper["title"],paper.get("abstract") or "", " ".join(paper.get("authors",[])),
+    # Key the FTS row by the paper's stable rowid instead of deleting by the
+    # UNINDEXED paper_id (a full-table scan costing 135 ms per paper, which held
+    # the write lock for minutes per import). init_db() aligns existing rows once.
+    paper_rowid = con.execute("SELECT rowid FROM papers WHERE id=?", (paper_id,)).fetchone()["rowid"]
+    con.execute("INSERT OR REPLACE INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue) VALUES(?,?,?,?,?,?,?)",
+                (paper_rowid,paper_id,paper["title"],paper.get("abstract") or "", " ".join(paper.get("authors",[])),
                  " ".join(paper.get("keywords",[])), venue["name"] if venue else ""))
     return "updated" if existing else "inserted"

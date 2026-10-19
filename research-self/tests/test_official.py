@@ -18,6 +18,10 @@ def test_pmlr_blocks_stable_ids_pdf_and_authors():
 def test_official_idempotency_and_preserved_abstract(tmp_path,monkeypatch):
     monkeypatch.setattr(db,'DB_PATH',tmp_path/'db.sqlite')
     monkeypatch.setattr(db,'DATA_ROOT',tmp_path)
+    # `sync_official` now enriches every paper by default: a full run used to land
+    # with 0% abstracts because enrichment was silently skipped for unbounded ICML
+    # imports. Stub the detail fetch so this remains an offline test.
+    monkeypatch.setattr(official,'enrich',lambda source,venue,paper: paper)
     def records(*args):
         return 'https://test.invalid/','test.html',[{'title':'[TEST FIXTURE] Paper','authors':['A'],'paper_url':'https://test.invalid/v1/test.html','abstract':None}]
     monkeypatch.setattr(official,'index_records',records)

@@ -4,13 +4,18 @@ import json
 import hashlib
 import re
 import sqlite3
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from . import db
 from .config import DATA_ROOT, venues
 from .openreview import OpenReview, normalize, raw_path, write_raw
+from . import semantics
+from . import years
 
 
 def venue_id(key: str, config: dict[str, Any], year: int) -> str:
@@ -168,8 +173,9 @@ async def sync_many(keys: list[str], year: int, **options: Any) -> list[dict[str
     return results
 
 
-def list_papers(*, venue: str | None = None, year: int = 2027, keyword: str | None = None,
+def list_papers(*, venue: str | None = None, year: int | None = None, keyword: str | None = None,
                 status: str | None = None, page: int = 1, page_size: int = 50, sort: str = "recent") -> dict[str, Any]:
+    year = years.resolve(year)
     venue = None if venue == "all" else venue
     db.init_db()
     clauses, args = [], []
@@ -198,7 +204,8 @@ def list_papers(*, venue: str | None = None, year: int = 2027, keyword: str | No
     return {"items":output,"total":total,"page":page,"page_size":page_size,"pages":max(1,(total+page_size-1)//page_size)}
 
 
-def graph(venue: str | None = None, year: int = 2027) -> dict[str, Any]:
+def graph(venue: str | None = None, year: int | None = None) -> dict[str, Any]:
+    year = years.resolve(year)
     venue = None if venue == "all" else venue
     db.init_db()
     with db.connect() as con:
@@ -223,65 +230,333 @@ def graph(venue: str | None = None, year: int = 2027) -> dict[str, Any]:
                 "vectors":[json.loads(r["vector_json"]) if r["vector_json"] else None for r in rows]}
 
 
-def generate_graph(venue: str, year: int = 2027) -> dict[str, Any]:
-    """Build deterministic CPU-only TF-IDF/SVD coordinates for a small local corpus."""
-    import numpy as np
+def _graph_docs(rows: list[sqlite3.Row]) -> list[str]:
+    """Title/keyword-weighted documents, alias-expanded, exactly as fitted."""
+    docs: list[str] = []
+    for r in rows:
+        try:
+            kws = json.loads(r["keywords_json"]) if r["keywords_json"] else None
+        except Exception:
+            kws = None
+        try:
+            docs.append(semantics.expand_aliases(semantics.make_doc(r["title"], kws, r["abstract"])))
+        except Exception:
+            docs.append(f"{r['title'] or ''} {r['abstract'] or ''}")
+    return docs
+
+
+def _project_2d(vectors: "np.ndarray") -> "np.ndarray":
+    """Project the *same* fitted semantic vectors to 2D.
+
+    Both branches consume the normalized 48-dim vectors that the similarity
+    ranking also uses, so the map and the neighbour structure share one
+    representation (previously a separate ``SemanticModel(dims=2)`` fit made the
+    map inconsistent with the 48-dim neighbour structure).
+
+    * ``n >= 30`` -> t-SNE (perplexity=min(30,(n-1)/3)), the preserved branch.
+    * ``4 <= n < 30`` -> deterministic PCA on the normalized vectors.
+
+    t-SNE is only attempted when the corpus has real 2D structure: with fewer
+    than 3 distinct vectors (or zero PCA variance, as happens when every
+    abstract is identical) ``init='pca'`` feeds a zero-variance embedding into
+    sklearn's gradient descent and the process dies with a stack overflow rather
+    than an exception. Those inputs fall back to the PCA layout.
+    """
+    from sklearn.decomposition import PCA
+
+    n = int(vectors.shape[0])
+    distinct = len(np.unique(vectors, axis=0))
+    coords = None
+    if n >= 30 and distinct >= 3:
+        pca_var = float(PCA(n_components=2, random_state=17).fit(vectors).explained_variance_.sum())
+        if np.isfinite(pca_var) and pca_var > 1e-12:
+            from sklearn.manifold import TSNE
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try:
+                    candidate = TSNE(
+                        n_components=2,
+                        perplexity=min(30.0, (n - 1) / 3),
+                        init="pca",
+                        learning_rate="auto",
+                        random_state=23,
+                        max_iter=750,
+                    ).fit_transform(vectors)
+                    if candidate.shape == (n, 2) and np.isfinite(candidate).all():
+                        coords = candidate
+                except Exception:
+                    coords = None
+    if coords is None:
+        coords = PCA(n_components=2, random_state=17).fit_transform(vectors)
+    coords = np.asarray(coords, dtype=float).reshape(-1, 2)
+    if coords.shape[0] != n:
+        raise RuntimeError(f"projection row mismatch: {coords.shape[0]} != {n}")
+    if not np.isfinite(coords).all():
+        raise RuntimeError("projection produced non-finite coordinates")
+    return coords
+
+
+def _cluster_count(n: int) -> int:
+    """Number of semantic regions, scaled for readability (100-1000 papers).
+
+    The previous ``sqrt(n/40)`` produced exactly 2 regions for every corpus
+    between 30 and 390 papers (a 129-paper ICML slice and a 400-paper one both
+    collapsed to 2-3 mega-blobs). ``sqrt(n/6)`` grows gently and never saturates
+    the 24 cap for realistic per-venue/per-year corpora: 129->5, 200->6, 300->7,
+    400->8, 600->10, 1000->13. Measured on the real ICML 2024 corpus at n=400:
+    separation ratio 1.51 -> 1.90 with kNN purity@5 0.81 -> 0.74 (expected: more
+    regions lower neighbour agreement while raising separation).
+    """
+    if n < 8:
+        return 1
+    return min(24, max(2, int(round(np.sqrt(n / 6.0)))))
+
+
+def _normalise_rows(vectors: "np.ndarray") -> "np.ndarray":
+    vectors = np.asarray(vectors, dtype=float)
+    if vectors.ndim == 1:
+        vectors = vectors.reshape(-1, 1)
+    if vectors.shape[1] < 2:
+        # A single SVD component cannot express 2D geometry; pad deterministically.
+        vectors = np.column_stack((vectors[:, 0], np.zeros(vectors.shape[0])))
+    return vectors / (np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-12)
+
+
+def _fit_semantic_model(docs: list[str], dims: int = 48) -> "semantics.SemanticModel":
+    """Fit the shared semantic model, relaxing TF-IDF pruning if it comes up empty.
+
+    ``semantics.SemanticModel`` hard-codes ``min_df=2``/``max_df=0.5``, which can
+    prune the entire vocabulary on a small or homogeneous corpus. That is a
+    legitimate ``ValueError`` from sklearn, not a corpus error, so retry once with
+    relaxation instead of surrendering the semantic representation. Built here
+    (not in semantics.py) so the guard lives with the caller that must survive.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = semantics.SemanticModel(dims=dims)
+        model.fit(docs)
+    if getattr(model, "vectorizer", None) is not None and getattr(model, "svd", None) is not None:
+        return model
+    raise RuntimeError("SemanticModel.fit produced an unusable model (no vectorizer/svd)")
+
+
+def _fit_relaxed_semantic_model(docs: list[str], dims: int = 48) -> "semantics.SemanticModel":
+    """Second chance with min_df=1/max_df=1.0, still a real fitted model.
+
+    Only reached when the strict fit raises. Produces a ``SemanticModel`` with a
+    genuinely fitted vectorizer/SVD so ``transform``/``save``/``load`` and the
+    API's usability check all keep working.
+    """
     from sklearn.decomposition import TruncatedSVD
     from sklearn.feature_extraction.text import TfidfVectorizer
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        vectorizer = TfidfVectorizer(
+            max_features=1024,
+            stop_words="english",
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+            min_df=1,
+            max_df=1.0,
+            strip_accents="unicode",
+        )
+        matrix = vectorizer.fit_transform(docs)
+        n_features = matrix.shape[1]
+        n_samples = matrix.shape[0]
+        comps = min(dims, max(2, n_features - 1), max(2, n_samples - 1))
+        comps = max(2, comps)
+        svd = TruncatedSVD(n_components=comps, random_state=17)
+        svd.fit_transform(matrix)
+        model = semantics.SemanticModel(dims=dims)
+        model.vectorizer = vectorizer
+        model.svd = svd
+        model.feature_names_ = vectorizer.get_feature_names_out()
+    return model
+
+
+def _fallback_label(c: int) -> str:
+    return f"Topic {c + 1}"
+
+
+def generate_graph(venue: str, year: int | None = None) -> dict[str, Any]:
+    """Build deterministic CPU-only semantic TF-IDF/SVD coordinates for a local corpus.
+
+    Degrades gracefully instead of raising: an unfittable model (empty/short
+    vocabulary), degenerate vectors, or a labelling failure still yields a
+    usable ``graph_points`` layout with a truthful status/method.
+    """
     from sklearn.cluster import KMeans
-    from sklearn.manifold import TSNE
+    from sklearn.exceptions import ConvergenceWarning
+
+    year = years.resolve(year)
     db.init_db()
-    with db.connect() as con:
-        rows=con.execute("SELECT p.id,p.title,p.abstract FROM papers p JOIN paper_venues pv ON pv.paper_id=p.id WHERE pv.venue_id=? AND pv.year=? ORDER BY p.id",(venue,year)).fetchall()
-        if not rows:
-            return {"venue":venue,"year":year,"papers":0,"status":"insufficient_data"}
-        docs=[(r["title"]+" "+(r["abstract"] or "")).strip() for r in rows]
-        if len(rows)<4:
-            coords=np.column_stack((np.arange(len(rows),dtype=float),np.zeros(len(rows))))
-            vectors=None
+    try:
+        with db.connect() as con:
+            rows = con.execute(
+                "SELECT p.id,p.title,p.abstract,p.keywords_json FROM papers p JOIN paper_venues pv ON pv.paper_id=p.id WHERE pv.venue_id=? AND pv.year=? ORDER BY p.id",
+                (venue, year),
+            ).fetchall()
+    except Exception as exc:  # unreadable/missing schema must not crash a sync
+        return {"venue": venue, "year": year, "papers": 0, "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}"}
+    if not rows:
+        return {"venue": venue, "year": year, "papers": 0, "status": "insufficient_data"}
+
+    n = len(rows)
+    docs = _graph_docs(rows)
+    model = None
+    vectors = None
+    degraded_reason: str | None = None
+
+    if n < 4:
+        # Preserved small-corpus branch: no model, zero-ish coordinates, 1 cluster.
+        coords = np.column_stack((np.arange(n, dtype=float), np.zeros(n)))
+        labels = np.zeros(n, dtype=int)
+        cluster_count = 1
+        topic_labels: dict[int, str] = {}
+    else:
+        try:
+            model = _fit_semantic_model(docs, dims=48)
+        except Exception as strict_exc:
+            try:
+                model = _fit_relaxed_semantic_model(docs, dims=48)
+            except Exception:
+                model = None
+                degraded_reason = f"{type(strict_exc).__name__}: {strict_exc}"
+        if model is not None:
+            try:
+                raw = model.transform(docs)
+                vectors = _normalise_rows(raw)
+                if vectors.shape[0] != n:
+                    raise RuntimeError(f"vector row mismatch: {vectors.shape[0]} != {n}")
+            except Exception as exc:
+                vectors = None
+                model = None
+                degraded_reason = f"{type(exc).__name__}: {exc}"
+
+        if vectors is None:
+            # Degrade: keep a deterministic left-to-right layout and one region.
+            coords = np.column_stack((np.arange(n, dtype=float), np.zeros(n)))
+            labels = np.zeros(n, dtype=int)
+            cluster_count = 1
+            topic_labels = {}
         else:
-            matrix=TfidfVectorizer(max_features=256,stop_words="english",ngram_range=(1,2)).fit_transform(docs)
-            dims=min(32,len(rows)-1,max(2,matrix.shape[1]-1))
-            vectors=TruncatedSVD(n_components=dims,random_state=17).fit_transform(matrix)
-            if vectors.shape[1]<2:
-                vectors=np.column_stack((vectors[:,0],np.zeros(len(rows))))
-            coords=TruncatedSVD(n_components=2,random_state=23).fit_transform(matrix) if min(matrix.shape)>2 else np.column_stack((np.arange(len(rows)),np.zeros(len(rows))))
-            vectors=vectors/(np.linalg.norm(vectors,axis=1,keepdims=True)+1e-12)
-            # The first two TF-IDF singular components create a frequency-driven
-            # wedge, not a neighbourhood map. Project the normalized semantic
-            # vectors while preserving their local neighbours instead.
-            if len(rows) >= 30:
-                coords=TSNE(n_components=2,perplexity=min(30.0,(len(rows)-1)/3),
-                            init='pca',learning_rate='auto',random_state=23,
-                            max_iter=750).fit_transform(vectors)
-            # Stable semantic regions from the same title+abstract representation.
-            cluster_count=min(24,max(2,int(np.sqrt(len(rows)/40)))) if len(rows)>=8 else 1
-            labels=KMeans(n_clusters=cluster_count,random_state=17,n_init=10).fit_predict(vectors) if cluster_count>1 else np.zeros(len(rows),dtype=int)
-        if len(rows)<4:
-            labels=np.zeros(len(rows),dtype=int)
-            cluster_count=1
-        coords=coords.astype(float)
-        for axis in range(2):
-            low,high=coords[:,axis].min(),coords[:,axis].max()
-            coords[:,axis]=(coords[:,axis]-low)/(high-low) if high>low else 0.5
-        with db.connect() as topic_con:
-            topic_con.execute("DELETE FROM graph_topics WHERE venue_id=?", (venue,))
-            for c in range(int(cluster_count)):
-                topic_con.execute("INSERT INTO graph_topics(venue_id,level,number,label) VALUES(?,?,?,?)", (venue,'cluster',c,f'Topic {c+1}'))
-                topic_con.execute("INSERT INTO graph_topics(venue_id,level,number,label) VALUES(?,?,?,?)", (venue,'region',c,f'Region {c+1}'))
-        for i,r in enumerate(rows):
-            vector=json.dumps(vectors[i].astype(float).tolist()) if vectors is not None else None
-            con.execute("INSERT INTO graph_points(paper_id,venue_id,x,y,region,cluster,vector_json) VALUES(?,?,?,?,?,?,?) ON CONFLICT(paper_id) DO UPDATE SET venue_id=excluded.venue_id,x=excluded.x,y=excluded.y,region=excluded.region,cluster=excluded.cluster,vector_json=excluded.vector_json",
-                        (r["id"],venue,float(coords[i,0]),float(coords[i,1]),int(labels[i]),int(labels[i]),vector))
+            try:
+                coords = _project_2d(vectors)
+            except Exception as exc:
+                degraded_reason = degraded_reason or f"projection fallback: {type(exc).__name__}: {exc}"
+                coords = np.column_stack((np.arange(n, dtype=float), np.zeros(n)))
+            cluster_count = _cluster_count(n)
+            # Degenerate corpora (identical abstracts) cannot support k clusters.
+            unique_vectors = len(np.unique(vectors, axis=0))
+            cluster_count = max(1, min(cluster_count, n, unique_vectors))
+            if cluster_count > 1:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", ConvergenceWarning)
+                        labels = KMeans(
+                            n_clusters=cluster_count, random_state=17, n_init=10
+                        ).fit_predict(vectors)
+                    labels = np.asarray(labels, dtype=int)
+                    if labels.shape[0] != n:
+                        raise RuntimeError("KMeans label length mismatch")
+                except Exception:
+                    labels = np.zeros(n, dtype=int)
+                    cluster_count = 1
+            else:
+                labels = np.zeros(n, dtype=int)
+            cluster_count = int(len(np.unique(labels)))
+            topic_labels = {}
+            try:
+                tfidf_matrix = model.vectorizer.transform(docs)
+                topic_labels = semantics.label_clusters_from_tfidf(
+                    tfidf_matrix, labels, model.feature_names_, top_k=3
+                ) or {}
+            except Exception:
+                topic_labels = {}
+
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[0] != n or coords.shape[1] < 2:
+        coords = np.column_stack((np.arange(n, dtype=float), np.zeros(n)))
+    coords = coords[:, :2]
+    coords[~np.isfinite(coords)] = 0.0
+    for axis in range(2):
+        low, high = coords[:, axis].min(), coords[:, axis].max()
+        coords[:, axis] = (coords[:, axis] - low) / (high - low) if high > low else 0.5
+
+    clusters = sorted(int(c) for c in np.unique(labels))
+    with db.connect() as con:
+        con.execute("DELETE FROM graph_topics WHERE venue_id=?", (venue,))
+        for c in clusters:
+            label = (topic_labels.get(c) or "").strip() or _fallback_label(c)
+            con.execute("INSERT INTO graph_topics(venue_id,level,number,label) VALUES(?,?,?,?)",
+                        (venue, "cluster", c, label))
+            con.execute("INSERT INTO graph_topics(venue_id,level,number,label) VALUES(?,?,?,?)",
+                        (venue, "region", c, label))
+        for i, r in enumerate(rows):
+            vector = json.dumps(vectors[i].astype(float).tolist()) if vectors is not None else None
+            con.execute(
+                "INSERT INTO graph_points(paper_id,venue_id,x,y,region,cluster,vector_json) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(paper_id) DO UPDATE SET venue_id=excluded.venue_id,x=excluded.x,y=excluded.y,"
+                "region=excluded.region,cluster=excluded.cluster,vector_json=excluded.vector_json",
+                (r["id"], venue, float(coords[i, 0]), float(coords[i, 1]),
+                 int(labels[i]), int(labels[i]), vector),
+            )
         # Similarity is stored as a provenance-labelled relation; no topic model is implied.
-        if vectors is not None:
-            similarity=vectors@vectors.T
-            for i,r in enumerate(rows):
-                order=np.argsort(-similarity[i])
-                for j in order:
-                    if i==j: continue
-                    target=rows[int(j)]["id"]
-                    con.execute("INSERT INTO paper_relations(source_paper_id,target_paper_id,relation_type,score,provenance) VALUES(?,?,?,?,?) ON CONFLICT(source_paper_id,target_paper_id,relation_type) DO UPDATE SET score=excluded.score,provenance=excluded.provenance",
-                                (r["id"],target,"similar",float(similarity[i,j]),"tfidf-svd-cosine-v1"))
-                    if con.execute("SELECT count(*) FROM paper_relations WHERE source_paper_id=? AND relation_type='similar'",(r["id"],)).fetchone()[0]>=10: break
-    return {"venue":venue,"year":year,"papers":len(rows),"clusters":int(cluster_count),"status":"generated","method":"TF-IDF + normalized SVD + t-SNE neighbourhood projection + KMeans (CPU)"}
+        # Exactly the 10 strongest neighbours per paper, replacing any stale rows
+        # from an earlier build so the cap cannot drift upward.
+        ids = [r["id"] for r in rows]
+        con.executemany(
+            "DELETE FROM paper_relations WHERE source_paper_id=? AND relation_type='similar'",
+            [(pid,) for pid in ids],
+        )
+        if vectors is not None and n > 1:
+            k = min(10, n - 1)
+            edges: list[tuple[str, str, str, float, str]] = []
+            chunk = 512
+            for start in range(0, n, chunk):
+                block = vectors[start:start + chunk] @ vectors.T  # chunk x n cosines
+                for offset in range(block.shape[0]):
+                    row_sims = block[offset].copy()
+                    row_sims[start + offset] = -np.inf
+                    top = np.argpartition(-row_sims, k - 1)[:k]
+                    top = top[np.argsort(-row_sims[top])]
+                    source = ids[start + offset]
+                    for j in top:
+                        edges.append((source, ids[int(j)], "similar",
+                                      float(row_sims[int(j)]), "tfidf-svd-cosine-v1"))
+            con.executemany(
+                "INSERT INTO paper_relations(source_paper_id,target_paper_id,relation_type,score,provenance) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(source_paper_id,target_paper_id,relation_type) "
+                "DO UPDATE SET score=excluded.score,provenance=excluded.provenance",
+                edges,
+            )
+    # Persist the fitted semantic model for downstream abstract search / gap mining.
+    # A degraded build must not leave a stale pkl behind: the API would load it and
+    # score queries in a vector space the current graph was never built with.
+    pkl = DATA_ROOT / "graph" / f"{venue}_{year}_semantic.pkl"
+    if vectors is not None and model is not None:
+        try:
+            model.save(pkl)
+        except Exception:
+            pass
+    elif pkl.exists():
+        try:
+            pkl.unlink()
+        except Exception:
+            pass
+    result: dict[str, Any] = {
+        "venue": venue,
+        "year": year,
+        "papers": n,
+        "clusters": int(cluster_count),
+        "status": "generated",
+        "method": "TF-IDF + normalized SVD + t-SNE neighbourhood projection + KMeans (CPU)",
+    }
+    if degraded_reason:
+        result["status"] = "generated_degraded"
+        result["degraded_reason"] = degraded_reason
+        result["method"] = "deterministic layout only (semantic model unavailable)"
+    return result

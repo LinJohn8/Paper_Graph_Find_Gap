@@ -7,6 +7,7 @@ export function PaperHeader() {
       </Link>
       <nav aria-label="Main navigation" className="flex gap-5 text-sm">
         <Link href="/">Papers</Link>
+        <Link href="/ideas">Idea Finder</Link>
         <Link href="/map">Graph</Link>
         <Link href="/sources">Data Sources</Link>
       </nav>

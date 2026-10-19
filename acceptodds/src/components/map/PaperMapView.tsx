@@ -77,7 +77,9 @@ const MapFilters = z.object({
 /** Global paper map with local search, topic colours and the original layout worker. */
 export function PaperMapView({
   kind,
-  year = 2027,
+  // Callers resolve this from the backend's available years; the calendar-year
+  // fallback avoids the old hardcoded placeholder year that had no data.
+  year = new Date().getFullYear(),
   initialPaper,
 }: {
   kind: string;
