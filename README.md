@@ -54,6 +54,34 @@ Three honest outcomes are reported separately rather than collapsing into one sc
 | Query shares no term with the vocabulary (typo, only stopwords) | `keyword-fallback` | "没有匹配到这个语义模型能理解的研究术语…请换用英文研究术语再试" and word-matched hits if any |
 | The global index was never built | `keyword-fallback` | "whole-corpus semantic index unavailable" — run `python -m paper_ingest.global_layout` |
 
+## Hybrid retrieval (why "SECI" works now)
+
+The Idea Finder used to rank with a single TF-IDF/SVD channel, which fails
+predictably: an acronym like **SECI** is not in the 1024-word SVD vocabulary, so
+the query vector was zero and the search collapsed to a keyword fallback with one
+0.00-scored row. Search is now three channels fused by **Reciprocal Rank
+Fusion** (rank-based, so cosine and BM25 need no score calibration):
+
+1. **Semantic** — cosine in the fitted vector space (the main channel);
+2. **FTS lexical** — whole tokens *and* prefix tokens (`learn*` matches
+   "learning"; bm25-ranked; the OR has to be explicit, `"learn" learn*` would be
+   an implicit AND and match nothing);
+3. **Substring** — LIKE over titles and abstracts, the channel that finds
+   "Secilia-Cxy" and "baseCIL" for `SECI`.
+
+A query the vocabulary cannot see still answers through channels 2–3, and the
+API adds two kinds of one-click refinements: **相近术语** (vocabulary terms close
+to the query spelling — `SECI` suggests `semi`, `social`, `series`…) and **相关词**
+(frequent words from the top hits, pseudo-relevance feedback). Clicking a chip
+re-runs the search with it.
+
+Measured on `SECI` (all years): 3 hits (the one real SECI paper, plus the two
+papers whose GitHub links contain the substring) plus 6 spelling suggestions —
+previously a single 0.00-scored row. Normal queries keep their semantic ranking;
+Chinese queries keep the term bridge.
+
+![Idea Finder answering the SECI query with suggestions](docs/screenshots/idea-finder-seci.png)
+
 ## Map performance notes
 
 The map is usable at corpus scale because of four changes:

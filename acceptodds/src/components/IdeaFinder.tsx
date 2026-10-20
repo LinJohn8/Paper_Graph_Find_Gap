@@ -50,6 +50,9 @@ export function IdeaFinder() {
   const [results, setResults] = useState<SemanticItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  /** Vocabulary terms close to the query spelling; frequent words from top hits. */
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [relatedTerms, setRelatedTerms] = useState<string[]>([]);
 
   /** Slugs the reader has ticked, and the transient "copied N" confirmation. */
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
@@ -85,8 +88,9 @@ export function IdeaFinder() {
     };
   }, []);
 
-  async function findPapers() {
-    if (!query.trim()) return;
+  async function findPapers(override?: string) {
+    const text = (override ?? query).trim();
+    if (!text) return;
     setSearching(true);
     setNote(null);
     try {
@@ -94,7 +98,7 @@ export function IdeaFinder() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          query: query.trim(),
+          query: text,
           ...(venue.trim() ? { venue: venue.trim() } : {}),
           // `all` asks the backend for the whole corpus, which it ranks against a
           // single globally fitted model; a number keeps the per-year behaviour.
@@ -109,9 +113,15 @@ export function IdeaFinder() {
       const data = (await response.json()) as SemanticResult;
       setResults(data.items ?? []);
       setNote(data.note ?? null);
+      // "Did you mean" chips: vocabulary terms close to the query spelling, and
+      // frequent words from the top hits (PRF). Clicking one re-runs the search.
+      setSuggestions((data as { suggestions?: string[] }).suggestions ?? []);
+      setRelatedTerms((data as { related_terms?: string[] }).related_terms ?? []);
       setSelected(new Set());
     } catch {
       setResults([]);
+      setSuggestions([]);
+      setRelatedTerms([]);
     } finally {
       setSearching(false);
     }
@@ -298,6 +308,40 @@ export function IdeaFinder() {
             <p className="mt-3 text-xs text-subtle">keyword fallback (no semantic model yet)</p>
           )}
           {note && note !== 'keyword fallback' && <p className="mt-3 text-xs text-subtle">{note}</p>}
+
+          {/* "Did you mean" refinements. Clicking replaces the query and re-searches. */}
+          {(suggestions.length > 0 || relatedTerms.length > 0) && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+              {suggestions.length > 0 && <span className="text-subtle">相近术语：</span>}
+              {suggestions.map((term) => (
+                <button
+                  key={`s-${term}`}
+                  type="button"
+                  className="rounded-full border border-accent px-2 py-0.5 text-accent hover:bg-accent hover:text-white"
+                  onClick={() => {
+                    setQuery(term);
+                    void findPapers(term);
+                  }}
+                >
+                  {term}
+                </button>
+              ))}
+              {relatedTerms.length > 0 && <span className="ml-2 text-subtle">相关词：</span>}
+              {relatedTerms.map((term) => (
+                <button
+                  key={`r-${term}`}
+                  type="button"
+                  className="rounded-full border border-frame px-2 py-0.5 text-subtle hover:border-ink hover:text-ink"
+                  onClick={() => {
+                    setQuery(term);
+                    void findPapers(term);
+                  }}
+                >
+                  {term}
+                </button>
+              ))}
+            </div>
+          )}
 
           {results.length > 0 && (
             <div className="sticky top-0 z-10 mt-5 border-y border-rule bg-bg/95 py-2 backdrop-blur">

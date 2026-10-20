@@ -14,7 +14,7 @@ from . import db
 from .config import venues as venue_registry
 from .config import DATA_ROOT
 from .service import graph, graph_titles, list_papers, _graph_docs
-from . import global_layout
+from . import global_layout, retrieval
 from . import semantics
 from . import years
 
@@ -374,51 +374,71 @@ def semantic_search(body:dict):
                 "SELECT v.id,v.name,pv.year,pv.relation_type FROM paper_venues pv "
                 "JOIN venues v ON v.id=pv.venue_id AND v.year=pv.year WHERE pv.paper_id=? "
                 "ORDER BY pv.year DESC,v.name",(item["id"],))]
+        # Hybrid fusion for a single year: the cosine ranking above plus the FTS
+        # prefix/prefix-token channel plus the title substring channel, fused by
+        # RRF. This is the same architecture as the all-years path, so "SECI" finds
+        # its one real paper in 2023 even though the SVD vocabulary has no such
+        # token, and ordinary queries gain recall without losing semantic order.
+        terms=[t for t in _fts_tokens(query)]
+        fts_ids=retrieval.fts_ranking(con,terms,limit=max(limit*3,60),venue=venue,year=year)
+        like_ids=retrieval.like_ranking(con,query,limit=max(limit,30),venue=venue,year=year)
+        semantic_ids=[item["id"] for item in sorted(scored,key=lambda x:(-x["score"],x["id"]))][:max(limit*3,60)]
+        score_by_id={item["id"]:item["score"] for item in scored}
+        fused=retrieval.rank_fuse([semantic_ids,fts_ids,like_ids])
+        hints:dict={}
+        try:
+            vocabulary=[str(v) for v in (model.feature_names_ or [])]
+            hints["spelling"]=retrieval.suggest_terms(query,vocabulary)
+            hints["related"]=retrieval.pseudo_relevance_feedback(
+                terms,[pid for pid,_ in fused[:5]],lambda ids2: retrieval.fetch_titles(con,ids2))
+        except Exception:
+            hints={"spelling":[],"related":[]}
+        ranked=[]
+        for pid,_fused in fused:
+            if pid not in score_by_id:
+                continue
+            item=next(i for i in scored if i["id"]==pid)
+            ranked.append(item)
+        ranked=ranked[:limit] or scored[:limit]
     if not scored:
         # Model exists but no in-scope paper could be scored at all: be explicit
         # rather than returning the misleading empty semantic result.
         return _semantic_items_from_keyword(query,venue,year,limit,
                                             "keyword fallback (no scored papers for this scope)")
-    scored.sort(key=lambda x:(-x["score"],x["id"]))
     note=None
     if recovered:
         note=(f"{recovered} of {len(scored)} items scored by embedding their text with the loaded "
               f"model (no stored graph vector for this model's corpus)")
+    suggestions=[t for t in (hints.get("spelling") or []) if t.lower() not in query.lower()][:6]
+    related=[t for t in (hints.get("related") or []) if t not in suggestions][:6]
     out=[]
-    for item in scored[:limit]:
+    for item in ranked:
         out.append({
             "id":item["id"],"slug":item["slug"],"title":item["title"],
             "abstract":item["abstract"] or "","authors":item["authors"],
             "venues":item["venues"],"year":item["year"],"score":item["score"],
             "doi":item.get("doi"),"paper_url":item.get("paper_url"),"pdf_url":item.get("pdf_url"),
         })
-    return {"items":out,"method":"semantic-svd","note":note,"query":query}
+    return {"items":out,"method":"hybrid-rrf","note":note,"query":query,
+            "suggestions":suggestions,"related_terms":related}
 
 
 def _semantic_search_all_years(query:str,venue:str|None,limit:int)->dict:
-    """Whole-corpus semantic search using the globally fitted model.
+    """Whole-corpus hybrid search: semantic cosine + FTS + substring, RRF-fused.
 
-    Scoring is a single matrix-vector product over the cached float32 matrix (one
-    vector per paper), and only the winning rows are read from SQLite, so the
-    73k-paper scope costs the same as a small one. The per-year path cannot be
-    reused because each venue-year has its own SVD basis.
+    The global model scores every paper with one matrix-vector product; the FTS
+    channel adds prefix-token matching and the LIKE channel adds substring
+    matching over titles, and the three rankings are fused by Reciprocal Rank
+    Fusion. That is what makes a query like "SECI" useful: the acronym's one
+    true paper surfaces even though the 1024-word SVD vocabulary has no "seci".
     """
-    hits=global_layout.search(query,limit=limit,venue=venue)
+    hints: dict = {}
+    hits=global_layout.search(query,limit=limit,venue=venue,suggest=hints)
     mode=(hits[0].get("mode") if hits else None)
     if mode=="unavailable":
         # The global index genuinely is not built (no pkl/npz on disk).
         return _semantic_items_from_keyword(query,venue,years.default_year(),limit,
                                             "keyword fallback (whole-corpus semantic index unavailable)")
-    if not hits or mode=="keyword":
-        # The model has no term in common with the query (a typo, only stopwords,
-        # or Chinese the bridge does not cover). That is a normal miss, not an
-        # outage: report it as such so it never reads as a broken deployment.
-        fallback=_semantic_items_from_keyword(query,venue,years.default_year(),limit,
-                                              "keyword fallback (no query term in the semantic vocabulary)")
-        fallback["method"]="keyword-fallback"
-        fallback["note"]=("没有匹配到这个语义模型能理解的研究术语（可能是拼写错误、全是停用词，"
-                          "或中文术语未被词表覆盖）。请换用英文研究术语再试。")
-        return fallback
     with db.connect() as con:
         items=[]
         for hit in hits:
@@ -436,16 +456,22 @@ def _semantic_search_all_years(query:str,venue:str|None,limit:int)->dict:
                 "venues":venue_rows,"year":year,"score":hit["score"],
                 "doi":row["doi"],"paper_url":row["paper_url"],"pdf_url":row["pdf_url"],
             })
+    # "Did you mean" chips: spelling-neighbour vocabulary terms plus PRF words.
+    suggestions=[t for t in (hints.get("spelling") or []) if t.lower() not in query.lower()][:6]
+    related=[t for t in (hints.get("related") or []) if t not in suggestions][:6]
+    out:dict={"query":query,"suggestions":suggestions,"related_terms":related}
     if not items:
-        return _semantic_items_from_keyword(query,venue,years.default_year(),limit,
-                                            "keyword fallback (no scored papers)")
+        out.update({"items":[],"method":"keyword-fallback",
+                    "note":("没有找到匹配的论文。下面是模型词表里与输入相近的术语，点击可重新检索。")})
+        return out
     if mode=="keyword":
-        return {"items":items,"method":"keyword-fallback",
-                "note":("这些词不在语义模型的词表里（中文、拼写错误或全是停用词），已按词面匹配返回。"
-                        "用英文研究术语检索效果最好。"),
-                "query":query}
-    return {"items":items,"method":"semantic-svd-global",
-            "note":"whole-corpus model (all years), one global semantic space","query":query}
+        out.update({"items":items,"method":"keyword-fallback",
+                    "note":("查询词不在语义模型的词表里（可能是缩写、拼写错误或未覆盖的中文），"
+                            "已按词面/前缀/子串匹配返回。")})
+        return out
+    out.update({"items":items,"method":"hybrid-rrf-global",
+                "note":"whole-corpus hybrid: semantic + lexical (RRF), all years"})
+    return out
 
 def _split_label(label:str|None)->list[str]:
     """graph_topics.label is 'term · term · term'; never emit empty terms."""

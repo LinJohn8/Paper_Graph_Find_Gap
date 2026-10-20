@@ -195,7 +195,8 @@ def test_semantic_search_contract(tmp_path):
     out = _run("semantic", tmp_path)
     assert out["status"] == 200
     body = out["body"]
-    assert body["method"] == "semantic-svd"
+    # The per-year path is now a hybrid (semantic + lexical channels, RRF-fused).
+    assert body["method"] == "hybrid-rrf"
     assert "items" in body and body["items"]
     for it in body["items"]:
         assert {"id", "slug", "title", "abstract", "authors", "venues", "year", "score"} <= set(it.keys())
