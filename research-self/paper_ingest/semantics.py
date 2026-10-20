@@ -254,10 +254,33 @@ def make_doc(title: str, keywords: list[str] | None, abstract: str | None) -> st
 # 1.3 Richer TF-IDF + SVD semantic model                                       #
 # --------------------------------------------------------------------------- #
 class SemanticModel:
-    """Deterministic TF-IDF + TruncatedSVD embedding, persisted with joblib."""
+    """Deterministic TF-IDF + TruncatedSVD embedding, persisted with joblib.
 
-    def __init__(self, dims: int) -> None:
-        self.dims = dims
+    2026-10 upgrade — why the knobs moved:
+    ``max_features=1024`` truncated the vocabulary to the 1024 most frequent
+    terms, which starves exactly the distinctive vocabulary retrieval needs: a
+    query for a rare-but-precise concept ("SECI") produced a zero query vector
+    because its token never made the cut, and cluster labels came from a coarse
+    space. The configuration is now:
+
+    * ``max_features=20_000`` with ``min_df=2`` — acronyms and specific terms
+      survive (the fused lexical channels still cover pure misses);
+    * ``ngram_range=(1,3)`` — trigrams capture "sample efficiency"-style
+      multi-word concepts that bigrams only half-encode;
+    * default ``dims`` raised 48 -> 128 — finer ranking geometry; the search
+      matrix grows ~2.7x but stays a sub-second matrix-vector product.
+      ``dims`` stays a constructor argument, and :meth:`fit` clamps it to the
+      data, so small corpora behave exactly as before.
+
+    Deterministic (fixed random_state), CPU-only, no external model download:
+    the project keeps running offline after the corpus is built.
+    """
+
+    #: Default embedding width. Callers may pass their own (``fit`` clamps).
+    DEFAULT_DIMS = 128
+
+    def __init__(self, dims: int | None = None) -> None:
+        self.dims = int(dims) if dims else self.DEFAULT_DIMS
         self.vectorizer = None
         self.svd = None
         self.feature_names_: np.ndarray | None = None
@@ -278,9 +301,9 @@ class SemanticModel:
 
         def _make_vectorizer(min_df_: int, max_df_: float, permissive: bool = False):
             opts: dict[str, Any] = dict(
-                max_features=1024,
+                max_features=20_000,
                 stop_words="english",
-                ngram_range=(1, 2),
+                ngram_range=(1, 3),
                 sublinear_tf=True,
                 min_df=min_df_,
                 max_df=max_df_,

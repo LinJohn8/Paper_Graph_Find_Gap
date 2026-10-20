@@ -41,7 +41,14 @@ def test_api_venues_and_paper_search(tmp_path,monkeypatch):
     monkeypatch.setattr(db,"DB_PATH",path)
     with TestClient(app) as client:
         venues=client.get("/api/venues").json()
-        assert {v["id"] for v in venues["items"]}=={"iclr","neurips","icml","acl","cvpr","tmlr"}
+        # The registry is the source of truth: conferences + TMLR + the curated
+        # journals (Nature/Science/Cell family etc.). Deriving the set from
+        # venues.yaml keeps this assertion stable as journals are added.
+        from paper_ingest.config import venues as venue_registry
+        expected=set(venue_registry().keys())
+        assert {v["id"] for v in venues["items"]}==expected
+        assert {"iclr","neurips","icml","acl","cvpr","tmlr"} <= expected
+        assert {"nature","science","jmlr"} <= expected  # journals present
         # `default_year` used to be the literal 2027 (a placeholder with no data).
         # It is now derived from the corpus: the newest year that has papers, or
         # the current calendar year when the database is empty. This fixture has

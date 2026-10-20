@@ -96,7 +96,6 @@ Two slow endpoints (`/api/papers/semantic`, `/api/gaps`) are Next.js route handl
 ## Data coverage (2022–2026)
 
 Every venue-year was rebuilt from the publishers' own indexes (ICLR virtual site, PMLR, NeurIPS Proceedings, ACL Anthology, CVF Open Access, jmlr.org for TMLR) and then deduplicated across sources. Counts now grow strictly year over year:
-
 | Year | Papers | Distinct titles | Abstract coverage |
 |---:|---:|---:|---:|
 | 2022 | 8,294 | 8,294 | 97% |
@@ -107,6 +106,41 @@ Every venue-year was rebuilt from the publishers' own indexes (ICLR virtual site
 | **Total** | **73,675** | **73,524** | **93%** |
 
 Known gaps: NeurIPS 2026 proceedings are not published yet (December 2026); TMLR abstracts are behind an OpenReview Cloudflare challenge (metadata is complete); 122 measured title-variant cross-source twins are retained rather than deleted. Root causes, fixes, per-cell expected-vs-actual numbers, and the rollback files are documented in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md).
+
+## Journal papers (Springer Nature, Science/Cell, IEEE, JMLR, …)
+
+The corpus was conference-only, which biases retrieval toward CS conference
+literature. It now also carries high-impact **journals** with the same metadata
+scope as everything else (title + abstract + authors + DOI + year; no PDFs):
+
+- **Source**: OpenAlex journal source ids (`paper_ingest/provider_journals.py`),
+  15 curated titles across Springer Nature (Nature, Nature MI, Nature
+  Communications, Nature Methods/Neuroscience, npj QI), AAAS/Cell Press
+  (Science, Cell, Neuron), IEEE (TPAMI, IJCV), JMLR, APS (PRL) and
+  chemistry/medicine (JACS, The Lancet). ``type:article`` only — editorials and
+  corrections are excluded by design.
+- **Abstract recovery**: OpenAlex has no abstract for many Springer/Elsevier
+  titles (measured: Nature MI 8/25, Cell 13/25) and Crossref deposits none for
+  those DOIs (0/8). The publishers' own landing pages ship the abstract as
+  ``<meta property="og:description">`` — measured 12/12 recovered — so
+  ``paper_ingest/journal_abstracts.py`` backfills from there at a polite 1 rps.
+  Already-harvested years reach ~98% abstract coverage.
+- **Harvest**: `python _run_journals.py [journal] [year] [--limit N]
+  [--no-backfill]` (idempotent; skips rows that already have abstracts). When
+  OpenAlex's shared per-IP daily budget runs out (HTTP 401), rerun the next day
+  or configure a free `OPENALEX_API_KEY` for a stable budget.
+
+## Semantics upgrade (2026-10)
+
+The semantic space is finer: TF-IDF vocabulary 1024 → **20,000 features** with
+1–3-grams, and the SVD width 48 → **128 dims** (global model; per-cell graphs
+follow suit). That is what lets rare-but-precise terms survive the projection —
+the old 1024-feature space was why "SECI" produced a zero query vector — while
+search stays a sub-second matrix–vector product (float32 73k×128).
+
+`python -m paper_ingest.global_layout` rebuilds the global model (~4 min for
+73k papers); it must be re-run after any corpus change so the all-years space
+covers the new papers.
 
 ## Start on Windows
 

@@ -30,7 +30,9 @@ def client(tmp_path,monkeypatch):
 def test_empty_platform_and_removed_endpoints(client):
     assert client.get('/api/papers').json()['pages'] == 1
     assert client.get('/api/graph?venue=all').json()['slugs'] == []
-    assert len(client.get('/api/venues').json()['items']) == 6
+    # The registry decides: 6 conference venues + TMLR + the curated journals.
+    from paper_ingest.config import venues as venue_registry
+    assert len(client.get('/api/venues').json()['items']) == len(venue_registry())
     assert all(v['paper_count']==0 for v in client.get('/api/venues').json()['items'])
     assert client.get('/api/papers/missing').status_code == 404
     for path in ('/api/trade','/api/wallet','/api/auth','/api/v1/me/portfolio'):

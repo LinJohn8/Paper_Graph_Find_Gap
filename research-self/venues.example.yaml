@@ -31,3 +31,60 @@ venues:
     provider: openreview_journal
     type: rolling_review
     years: [2022, 2023, 2024, 2025, 2026, 2027]
+  # Journals (see paper_ingest/provider_journals.py; source ids verified live).
+  # Harvest with: python _run_journals.py [key] [year]
+  nature:
+    name: Nature
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  naturemi:
+    name: Nature Machine Intelligence
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  naturecomms:
+    name: Nature Communications
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  science:
+    name: Science
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  cell:
+    name: Cell
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  tpami:
+    name: IEEE TPAMI
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  ijcv:
+    name: IJCV
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  jmlr:
+    name: JMLR
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  prl:
+    name: Physical Review Letters
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  jacs:
+    name: JACS
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  lancet:
+    name: The Lancet
+    provider: journal_openalex
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]

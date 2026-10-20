@@ -42,7 +42,10 @@ from . import db, retrieval, semantics
 MODEL_FILENAME = "all_all_semantic.pkl"
 VECTOR_FILENAME = "all_all_vectors.npz"
 CLUSTERS = 40
-DIMS = 48
+# 128-dim matches semantics.SemanticModel's upgraded default: the ranking
+# geometry is noticeably finer at corpus scale, and the search matrix stays a
+# sub-second matrix-vector product (float32 73675x128).
+DIMS = 128
 
 _index_cache: dict[str, Any] = {}
 

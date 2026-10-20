@@ -526,10 +526,10 @@ def generate_graph(venue: str, year: int | None = None) -> dict[str, Any]:
         topic_labels: dict[int, str] = {}
     else:
         try:
-            model = _fit_semantic_model(docs, dims=48)
+            model = _fit_semantic_model(docs, dims=128)
         except Exception as strict_exc:
             try:
-                model = _fit_relaxed_semantic_model(docs, dims=48)
+                model = _fit_relaxed_semantic_model(docs, dims=128)
             except Exception:
                 model = None
                 degraded_reason = f"{type(strict_exc).__name__}: {strict_exc}"
