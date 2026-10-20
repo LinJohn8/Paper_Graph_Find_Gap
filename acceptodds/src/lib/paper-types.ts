@@ -22,6 +22,10 @@ export interface PaperMap {
   areas: string[];
   regions: Topic[];
   clusters: Topic[];
+  /** `all` when the payload spans every year in the corpus. */
+  year_mode?: 'single' | 'all';
+  /** Publication year per point; only sent for `year=all` payloads. */
+  years?: (number | null)[];
 }
 export interface MapTitles {
   titles: Record<string, string>;
@@ -57,6 +61,10 @@ export interface SemanticItem {
   venues: { id: string; name: string; year: number; relation_type: string }[];
   year: number;
   score: number;
+  /** Optional links, added for copy/export; absent on older payloads. */
+  doi?: string | null;
+  paper_url?: string | null;
+  pdf_url?: string | null;
 }
 
 export interface SemanticResult {

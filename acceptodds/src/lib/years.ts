@@ -18,6 +18,37 @@ export type YearInfo = {
   currentYear: number;
 };
 
+/**
+ * The `year` query-parameter value that means "the whole corpus, every year".
+ *
+ * The backend accepts `all` anywhere it accepts a year (papers, graph, titles,
+ * search, semantic search). It is a string, not a number, so callers must keep
+ * the raw parameter around instead of coercing it with `Number()`.
+ */
+export const ALL_YEARS = 'all';
+export type YearParam = number | typeof ALL_YEARS;
+
+/** Whether a raw `year` search parameter asks for the whole corpus. */
+export function isAllYears(raw: string | string[] | undefined): boolean {
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  return !!value && value.trim().toLowerCase() === ALL_YEARS;
+}
+
+/**
+ * Values for a year `<select>`: `all` first, then the concrete years newest
+ * first. Use this instead of `yearOptions()` so every year control in the app
+ * offers the same choices.
+ */
+export function yearSelectValues(info?: YearInfo | null, selected?: YearParam): YearParam[] {
+  const concrete = typeof selected === 'number' ? yearOptions(info, selected) : yearOptions(info);
+  return [ALL_YEARS, ...concrete];
+}
+
+/** Human label for a year control value. */
+export function yearLabel(value: YearParam): string {
+  return value === ALL_YEARS ? 'All years' : String(value);
+}
+
 /** The calendar year in the viewer's timezone (used before any data loads). */
 export function currentYear(): number {
   return new Date().getFullYear();

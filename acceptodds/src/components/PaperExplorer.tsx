@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { yearOptions, type YearInfo } from '@/lib/years';
+import { ALL_YEARS, yearLabel, yearSelectValues, type YearInfo } from '@/lib/years';
 
 type Item = {
   id: string;
@@ -35,7 +35,7 @@ export async function PaperExplorer({
   sort,
 }: {
   venue: string;
-  year: number;
+  year: number | 'all';
   yearInfo?: YearInfo | null;
   keyword: string;
   page: number;
@@ -87,17 +87,18 @@ export async function PaperExplorer({
             ))}
         </select>
         {/* Offer the years the backend actually has, instead of a bare number box
-            that defaults to a year with no data. */}
+            that defaults to a year with no data. `all` searches the whole corpus
+            and is a plain string, so it must never be coerced to a number. */}
         <select
           aria-label="Year"
           className="border border-frame bg-card px-3 py-2"
           name="year"
           defaultValue={String(year)}
         >
-          {yearOptions(yearInfo, year).map((y) => (
+          {yearSelectValues(yearInfo, year).map((y) => (
             <option key={y} value={y}>
-              {y}
-              {yearInfo?.availableYears.includes(y) ? '' : ' (no data)'}
+              {yearLabel(y)}
+              {typeof y === 'number' && !yearInfo?.availableYears.includes(y) ? ' (no data)' : ''}
             </option>
           ))}
         </select>
@@ -125,7 +126,7 @@ export async function PaperExplorer({
       </form>
       <div className="flex items-center justify-between py-3 text-sm text-subtle">
         <span>{result ? `${result.total.toLocaleString()} papers` : 'Paper API is unavailable'}</span>
-        <span>Showing {year} data</span>
+        <span>Showing {year === ALL_YEARS ? 'all years' : `${year} data`}</span>
       </div>
       <section className="divide-y divide-rule border-y border-rule">
         {items.map((paper) => (

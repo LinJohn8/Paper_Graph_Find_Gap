@@ -59,9 +59,17 @@ const MIN_LABELLED = { region: 40, cluster: 15 };
 const SEARCH_HITS = 10;
 /** On by default, a redraw restarts on every search, so wait for a pause in the typing. */
 const SEARCH_DEBOUNCE_MS = 450;
+/** A hovered point's title is fetched once the pointer settles on it. */
+const TITLE_DEBOUNCE_MS = 150;
 /** A paper the search did not find: still there, barely. */
 const UNMATCHED_ALPHA = 22;
 const MAP_FILTERS_KEY = 'map-filters';
+/**
+ * Above this many points the map drops collision-tested topic labels and the
+ * hover tooltip's per-pixel updates: both are per-frame costs that grow with the
+ * corpus, and at 70k points the labels overlap into an unreadable wash anyway.
+ */
+const HEAVY_CORPUS = 25_000;
 const subscribeToBrowser = () => () => {};
 const browserSnapshot = () => true;
 const serverSnapshot = () => false;
@@ -83,7 +91,8 @@ export function PaperMapView({
   initialPaper,
 }: {
   kind: string;
-  year?: number;
+  /** A concrete year, or `'all'` for the whole corpus in one global layout. */
+  year?: number | 'all';
   initialPaper: string | null;
 }) {
   const router = useRouter();
@@ -132,11 +141,9 @@ export function PaperMapView({
 
   const derived = useMemo(() => (data ? derive(data) : null), [data]);
   const points = derived?.points;
-  // Asked for only once the map is drawable, so the two never compete for the line.
-  const { data: titles } = useSWR<MapTitles>(data ? `/api/graph/titles?${venue}` : null, publicJson, {
-    revalidateOnFocus: false,
-  });
-  const titleOf = (i: number): ReactNode => titles?.titles[points![i].slug] ?? <span className="italic">…</span>;
+  // The whole-corpus view (73k points) needs a lighter rendering path: no topic
+  // labels, no worker re-layout while searching.
+  const heavy = (points?.length ?? 0) > HEAVY_CORPUS;
   const colours = useMemo(
     () => (points && derived ? paint(points, colourBy, derived.areaIndex) : null),
     [points, colourBy, derived],
@@ -160,6 +167,39 @@ export function PaperMapView({
       }),
     [relatedTop, derived],
   );
+
+  // The base payload no longer carries titles: the map asks only for the few
+  // slugs it is about to label. Fetching 73k titles would cost more than the
+  // coordinates themselves and most are never shown.
+  //
+  // Hovering fires per point, so the hovered slug is debounced: without it every
+  // mouse move over a dense map would issue its own titles request.
+  const [titleHover, setTitleHover] = useState<number | null>(null);
+  useEffect(() => {
+    if (!hover) {
+      setTitleHover(null);
+      return;
+    }
+    const t = setTimeout(() => setTitleHover(hover.index), TITLE_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [hover]);
+  const wantedTitles = useMemo(() => {
+    if (!points) return [];
+    const wanted = new Set<number>();
+    if (titleHover !== null) wanted.add(titleHover);
+    if (selected !== null) wanted.add(selected);
+    for (const i of relatedHere) wanted.add(i);
+    return [...wanted].map((i) => points[i]?.slug).filter((s): s is string => !!s);
+  }, [points, titleHover, selected, relatedHere]);
+  const titlesKey =
+    wantedTitles.length > 0
+      ? `/api/graph/titles?${venue}&slugs=${wantedTitles.map((s) => encodeURIComponent(s)).join(',')}`
+      : null;
+  const { data: titles } = useSWR<MapTitles>(titlesKey, publicJson, {
+    revalidateOnFocus: false,
+    keepPreviousData: true,
+  });
+  const titleOf = (i: number): ReactNode => titles?.titles[points![i].slug] ?? <span className="italic">…</span>;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setSelected(null);
@@ -200,7 +240,9 @@ export function PaperMapView({
   }, [redraw, matches, points]);
 
   // Redrawn, the rest is hidden and the matches are laid out again among themselves, in a worker, and drawn as they settle.
-  const relaySubset = onlyMatches && matches && matches.length <= MAX_RELAYOUT ? matches : null;
+  // The whole-corpus map is never re-laid out: a worker embedding of 70k points
+  // would freeze the tab, and the search already had to scan that many papers.
+  const relaySubset = !heavy && onlyMatches && matches && matches.length <= MAX_RELAYOUT ? matches : null;
   // Fetched only once a search needs it: most visits never search.
   const { data: relatedEdges } = useSWR<MapRelated>(relaySubset ? `/api/graph/related?${venue}` : null, publicJson, {
     revalidateOnFocus: false,
@@ -257,8 +299,11 @@ export function PaperMapView({
         ? ', laid out again'
         : ', laying out…';
   // Labels follow a re-laid-out map once it settles, named only from the papers on it.
+  // The whole-corpus view is too dense for words: keep the layer empty so deck
+  // skips the per-frame collision pass, which is one of the costliest stages.
   const labels = useMemo(() => {
     if (!derived) return null;
+    if (heavy) return { regions: [], clusters: [] };
     if (!relaid) return { regions: derived.regionLabels, clusters: derived.clusterLabels };
     if (!relaid.settled || !matches) return { regions: [], clusters: [] };
     const on = new Set(matches);
@@ -277,7 +322,7 @@ export function PaperMapView({
         MIN_LABELLED.cluster / 3,
       ),
     };
-  }, [derived, relaid, matches]);
+  }, [derived, relaid, matches, heavy]);
 
   const go = (i: number) => {
     setSelected(i);

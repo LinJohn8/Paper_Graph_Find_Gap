@@ -4,13 +4,19 @@ Paper Graph is a local, login-free academic paper browser. It stores source meta
 
 ## Screenshots
 
-Papers page — the UI opens on the newest year that actually has data. The repaired 2022–2026 corpus holds **73,675 papers** (5 conferences + TMLR journal):
+Papers page — the UI opens on the newest year that actually has data, and the Year control offers **All years** to browse the whole corpus at once. The repaired 2022–2026 corpus holds **73,675 papers** (5 conferences + TMLR journal):
 
 ![Papers page showing 20,412 papers for 2026](docs/screenshots/papers-2026.png)
+
+![Papers page showing all 73,675 papers across all years](docs/screenshots/papers-all-years.png)
 
 Paper map — one semantic coordinate per paper (TF-IDF/SVD + t-SNE neighbourhood projection + KMeans), rebuilt for every venue-year:
 
 ![Paper map for 2026 with 20,412 points](docs/screenshots/map-2026.png)
+
+Paper map with **All years**: the whole corpus in one globally fitted semantic space (PCA-2 over a single TF-IDF/SVD model fitted on all 73,675 papers — per-venue-year layouts live in separate SVD bases and cannot be overlaid):
+
+![Whole-corpus paper map with 73,675 points](docs/screenshots/map-all-years.png)
 
 Data Sources — per-venue, per-year local paper counts and last sync status:
 
@@ -19,6 +25,22 @@ Data Sources — per-venue, per-year local paper counts and last sync status:
 Paper detail — abstract, extracted research questions, stated gaps and related papers:
 
 ![Paper detail page](docs/screenshots/paper-detail.png)
+
+## All-years mode and the idea finder
+
+**All years.** Every year control (`/` and `/map`) accepts `year=all`: the list pages through the whole corpus, and the map plots it in one space. Per-venue-year maps keep their own layout, which is correct for comparing papers *within* a year. Use `python -m paper_ingest.global_layout` to (re)build the global model after a corpus change; it writes `Data/graph/all_all_semantic.pkl`, `Data/graph/all_all_vectors.npz` and the `graph_points_global` table (~3 min for 73k papers).
+
+**Idea finder** (`/ideas`) ranks the corpus against a free-text idea. With *All years* it scores every paper in the global space (one matrix–vector product over the cached float32 matrix), otherwise it uses that year's fitted model. Each hit is selectable, and the sticky toolbar copies the selection — or every result when nothing is ticked — as **Markdown links**, **titles**, **plain URLs** or **BibTeX**. Link preference is the publisher landing page, then `https://doi.org/<doi>`, then this app's `/papers/<slug>` page.
+
+## Map performance notes
+
+The map is usable at corpus scale because of four changes:
+
+- `/api/graph` no longer ships the 48-dim vectors or the title map (they were unused by the map); `?include=full` still returns them. The ICML 2026 payload went from **6.4 MB to 288 KB**.
+- Responses are gzip-compressed (≈5–6×), and payloads are cached in-process for 10 minutes.
+- Titles are fetched lazily, debounced, only for the slugs about to be labelled (`/api/graph/titles?...&slugs=a,b,c`).
+- Above 25,000 points the map skips collision-tested topic labels and the worker re-layout during a search, both of which are per-frame costs that grow with the corpus.
+
 
 ## Data coverage (2022–2026)
 

@@ -1,7 +1,15 @@
 import type { Metadata } from 'next';
 import { load } from '@/lib/paper-api';
 import { PaperMapView } from '@/components/map/PaperMapView';
-import { parseYearInfo, resolveYear, yearOptions } from '@/lib/years';
+import {
+  ALL_YEARS,
+  isAllYears,
+  parseYearInfo,
+  resolveYear,
+  yearLabel,
+  yearSelectValues,
+  type YearParam,
+} from '@/lib/years';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Paper map | Paper Graph' };
@@ -14,7 +22,10 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
   const registry = await load('/api/venues');
   // Use the backend's real default year rather than a literal that has no data.
   const info = parseYearInfo(registry);
-  const year = resolveYear(first(sp.year) ?? undefined, info);
+  // `year=all` plots the whole corpus in one globally fitted semantic space; it is
+  // a string sentinel, so it must never be coerced to a number.
+  const requested = first(sp.year) ?? undefined;
+  const year: YearParam = isAllYears(requested) ? ALL_YEARS : resolveYear(requested, info);
   return (
     <main>
       <form action="/map" className="flex gap-3 px-6 py-3">
@@ -36,10 +47,10 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
         <label>
           Year{' '}
           <select name="year" defaultValue={String(year)} className="border border-rule">
-            {yearOptions(info, year).map((y) => (
+            {yearSelectValues(info, year).map((y) => (
               <option key={y} value={y}>
-                {y}
-                {info?.availableYears.includes(y) ? '' : ' (no data)'}
+                {yearLabel(y)}
+                {typeof y === 'number' && info && !info.availableYears.includes(y) ? ' (no data)' : ''}
               </option>
             ))}
           </select>

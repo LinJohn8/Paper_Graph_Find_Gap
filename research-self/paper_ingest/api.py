@@ -5,17 +5,22 @@ import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.gzip import GZipMiddleware
 
 import numpy as np
 
 from . import db
 from .config import venues as venue_registry
 from .config import DATA_ROOT
-from .service import graph, list_papers, _graph_docs
+from .service import graph, graph_titles, list_papers, _graph_docs
+from . import global_layout
 from . import semantics
 from . import years
 
 app=FastAPI(title="Paper Graph local API",version="0.1.0")
+# The map payload is thousands of coordinate numbers, so it compresses ~5-6x.
+# Without this the browser downloads and parses a multi-MB JSON document.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 @app.on_event("startup")
 def startup(): db.init_db()
@@ -50,7 +55,8 @@ def venues():
             out.append({"id":key,"name":cfg["name"],"year":year,"provider":cfg["provider"],"type":cfg["type"],
                         "status":stored["availability_status"] if stored else "not_checked","source_venue_id":stored["source_venue_id"] if stored else None,
                         "last_sync_at":stored["last_sync_at"] if stored else None,"year_rule":cfg.get("year_rule"),"paper_count":count,"latest_result":job["status"] if job else "not_checked","error_message":job["error_message"] if job else None})
-    return {"default_year":years.default_year(),"available_years":years.available_years(),"current_year":current,"items":out}
+    return {"default_year":years.default_year(),"available_years":years.available_years(),
+            "all_years":years.ALL_YEARS,"current_year":current,"items":out}
 
 @app.get("/api/venues/{venue_id}/status")
 def venue_status(venue_id:str,year:int|None=None):
@@ -62,8 +68,9 @@ def venue_status(venue_id:str,year:int|None=None):
     return {"venue":dict(row) if row else None,"papers":count,"jobs":jobs}
 
 @app.get("/api/papers")
-def papers(venue:str|None=None,year:int|None=None,keyword:str|None=None,status:str|None=None,page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=200),sort:str="recent"):
-    year = years.resolve(year)
+def papers(venue:str|None=None,year:str|None=None,keyword:str|None=None,status:str|None=None,page:int=Query(1,ge=1),page_size:int=Query(50,ge=1,le=200),sort:str="recent"):
+    # `year` is a string so the `all` sentinel survives; the service resolves a
+    # concrete year when it is one.
     try:return list_papers(venue=venue,year=year,keyword=keyword,status=status,page=page,page_size=page_size,sort=sort)
     except Exception as exc: raise HTTPException(400,str(exc)) from exc
 
@@ -232,11 +239,14 @@ def semantic_search(body:dict):
         raise HTTPException(400,"JSON object body is required")
     query=str(body.get("query") or "")
     venue=body.get("venue")
-    year=_int_param(body.get("year"),years.default_year(),low=1900,high=2200)
+    raw_year=body.get("year")
     limit=_int_param(body.get("limit"),10,low=1,high=200)
     if not query.strip():
         raise HTTPException(400,"query is required")
     venue=None if venue=="all" else (str(venue) if venue else None)
+    if years.is_all(raw_year):
+        return _semantic_search_all_years(query,venue,limit)
+    year=_int_param(raw_year,years.default_year(),low=1900,high=2200)
     info,model=_load_semantic_model_scoped(venue,year)
     if model is None:
         # No fitted semantic model yet: fall back to keyword (FTS) search, but
@@ -258,7 +268,7 @@ def semantic_search(body:dict):
     with db.connect() as con:
         # LEFT JOIN: a paper without a stored graph vector must still be ranked by
         # transforming its text, instead of silently disappearing from the list.
-        sql=("SELECT p.id,p.title,p.abstract,p.authors_json,p.keywords_json,"
+        sql=("SELECT p.id,p.title,p.abstract,p.authors_json,p.keywords_json,p.doi,p.paper_url,p.pdf_url,"
              "g.vector_json,g.venue_id AS point_venue FROM papers p "
              "JOIN paper_venues pv ON pv.paper_id=p.id "
              "LEFT JOIN graph_points g ON g.paper_id=p.id WHERE pv.year=?")
@@ -288,6 +298,7 @@ def semantic_search(body:dict):
                 score=float(_unit(stored)@qvec)
                 scored.append({"id":r["id"],"slug":r["id"],"title":r["title"],
                                "abstract":r["abstract"],"authors":json_value(r["authors_json"]),
+                               "doi":r["doi"],"paper_url":r["paper_url"],"pdf_url":r["pdf_url"],
                                "year":year,"score":round(score,6)})
             else:
                 pending.append((r,_graph_docs([r])[0]))
@@ -302,6 +313,7 @@ def semantic_search(body:dict):
                     score=float(_unit(v)@qvec)
                     scored.append({"id":r["id"],"slug":r["id"],"title":r["title"],
                                    "abstract":r["abstract"],"authors":json_value(r["authors_json"]),
+                                   "doi":r["doi"],"paper_url":r["paper_url"],"pdf_url":r["pdf_url"],
                                    "year":year,"score":round(score,6)})
                     recovered+=1
             except Exception:
@@ -328,8 +340,45 @@ def semantic_search(body:dict):
             "id":item["id"],"slug":item["slug"],"title":item["title"],
             "abstract":item["abstract"] or "","authors":item["authors"],
             "venues":item["venues"],"year":item["year"],"score":item["score"],
+            "doi":item.get("doi"),"paper_url":item.get("paper_url"),"pdf_url":item.get("pdf_url"),
         })
     return {"items":out,"method":"semantic-svd","note":note,"query":query}
+
+
+def _semantic_search_all_years(query:str,venue:str|None,limit:int)->dict:
+    """Whole-corpus semantic search using the globally fitted model.
+
+    Scoring is a single matrix-vector product over the cached float32 matrix (one
+    vector per paper), and only the winning rows are read from SQLite, so the
+    73k-paper scope costs the same as a small one. The per-year path cannot be
+    reused because each venue-year has its own SVD basis.
+    """
+    hits=global_layout.search(query,limit=limit,venue=venue)
+    if not hits:
+        return _semantic_items_from_keyword(query,venue,years.default_year(),limit,
+                                            "keyword fallback (whole-corpus semantic index unavailable)")
+    with db.connect() as con:
+        items=[]
+        for hit in hits:
+            row=con.execute("SELECT id,title,abstract,authors_json,doi,paper_url,pdf_url FROM papers WHERE id=?",(hit["id"],)).fetchone()
+            if row is None:
+                continue
+            venue_rows=[dict(v) for v in con.execute(
+                "SELECT v.id,v.name,pv.year,pv.relation_type FROM paper_venues pv "
+                "JOIN venues v ON v.id=pv.venue_id AND v.year=pv.year WHERE pv.paper_id=? "
+                "ORDER BY pv.year DESC,v.name",(hit["id"],))]
+            year=hit["year"] or max((int(v["year"]) for v in venue_rows if v.get("year")),default=0)
+            items.append({
+                "id":row["id"],"slug":row["id"],"title":row["title"],
+                "abstract":row["abstract"] or "","authors":json_value(row["authors_json"]),
+                "venues":venue_rows,"year":year,"score":hit["score"],
+                "doi":row["doi"],"paper_url":row["paper_url"],"pdf_url":row["pdf_url"],
+            })
+    if not items:
+        return _semantic_items_from_keyword(query,venue,years.default_year(),limit,
+                                            "keyword fallback (no scored papers)")
+    return {"items":items,"method":"semantic-svd-global",
+            "note":"whole-corpus model (all years), one global semantic space","query":query}
 
 def _split_label(label:str|None)->list[str]:
     """graph_topics.label is 'term · term · term'; never emit empty terms."""
@@ -356,7 +405,12 @@ def _terms_from_cluster_tfidf(rows,labels,venue:str|None,year:int)->dict[int,lis
         return {}
 
 @app.get("/api/gaps")
-def gaps(venue:str|None=None,year:int|None=None):
+def gaps(venue:str|None=None,year:str|None=None):
+    if years.is_all(year):
+        # detect_gaps is quadratic in the corpus, so a whole-corpus scan would
+        # never return. Degrade with a truthful note instead of hanging.
+        return {"gaps":[],"topics":[],
+                "note":"Gap scanning compares one fixed corpus; pick a year (and optionally a venue) instead of all years."}
     year = years.resolve(year)
     try:
         return _gaps(venue,year)
@@ -451,21 +505,29 @@ def _gaps(venue:str|None,year:int)->dict:
         return {"gaps":gaps_result,"topics":topics}
 
 @app.get("/api/graph")
-def graph_data(venue:str|None=None,year:int|None=None): return graph(venue,years.resolve(year))
+def graph_data(venue:str|None=None,year:str|None=None,include:str="base"):
+    """Map payload. `year=all` returns the whole corpus in one global space.
+
+    The base payload omits the 48-dim vectors and the title map (the map fetches
+    titles lazily); `include=full` restores them for callers that need them.
+    """
+    return graph(venue,year,include_vectors=include=="full")
 
 @app.get("/api/graph/titles")
-def graph_titles(venue:str|None=None,year:int|None=None):
-    result=graph(venue,years.resolve(year))
-    return {"titles":result["titles"]}
+def graph_titles_route(venue:str|None=None,year:str|None=None,slugs:str|None=None):
+    # `slugs` is a comma-separated subset: the map labels a handful of points and
+    # must not download 70k titles to do it.
+    wanted=[s for s in (slugs or "").split(",") if s.strip()] or None
+    return {"titles":graph_titles(venue,year,slugs=wanted)}
 
 @app.get("/api/graph/search")
-def graph_search(q:str,venue:str|None=None,year:int|None=None):
-    result=list_papers(venue=venue,year=years.resolve(year),keyword=q,page=1,page_size=10000)
+def graph_search(q:str,venue:str|None=None,year:str|None=None):
+    result=list_papers(venue=venue,year=year,keyword=q,page=1,page_size=10000)
     return {"slugs":[p["id"] for p in result["items"]],"errors":[]}
 
 @app.get("/api/graph/related")
-def graph_related(venue:str|None=None,year:int|None=None):
-    data=graph(venue,years.resolve(year))
+def graph_related(venue:str|None=None,year:str|None=None):
+    data=graph(venue,year)
     slugs=data["slugs"]
     index={slug:i for i,slug in enumerate(slugs)}
     with db.connect() as con:
@@ -474,8 +536,10 @@ def graph_related(venue:str|None=None,year:int|None=None):
     return {"slugs":slugs,"edges":edges}
 
 @app.get("/api/graph/{paper_id:path}/minimap")
-def graph_minimap(paper_id:str,venue:str|None=None,year:int|None=None):
-    all_data=graph(venue,years.resolve(year))
+def graph_minimap(paper_id:str,venue:str|None=None,year:str|None=None):
+    # The minimap needs the vectors and titles that the map payload intentionally
+    # drops, and it is a per-paper request, so it is not worth caching.
+    all_data=graph(venue,year,include_vectors=True,use_cache=False)
     try:self_index=all_data["slugs"].index(paper_id)
     except ValueError:raise HTTPException(404,"Paper has no graph point")
     with db.connect() as con:

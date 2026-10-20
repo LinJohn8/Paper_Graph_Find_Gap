@@ -33,6 +33,33 @@ def current_year() -> int:
     return datetime.now().astimezone().year
 
 
+#: `year` parameter value meaning "the whole corpus, every year".
+ALL_YEARS = "all"
+
+
+def is_all(value: object) -> bool:
+    """Whether a raw ``year`` parameter asks for the whole corpus."""
+    return isinstance(value, str) and value.strip().lower() == ALL_YEARS
+
+
+def parse(value: object, fallback: int | None = None) -> int | str:
+    """Turn a raw ``year`` parameter into an int or :data:`ALL_YEARS`.
+
+    Accepts ``None``/blank (fallback/default year), a numeric string, an int, or
+    the literal ``all``. Anything else falls back instead of raising, so a stale
+    bookmark cannot 500 an endpoint.
+    """
+    if is_all(value):
+        return ALL_YEARS
+    if isinstance(value, int):
+        return value if 1900 <= value <= 2200 else (fallback if fallback is not None else default_year())
+    if isinstance(value, str) and value.strip().isdigit():
+        number = int(value.strip())
+        if 1900 <= number <= 2200:
+            return number
+    return fallback if fallback is not None else default_year()
+
+
 def _override() -> int | None:
     raw = os.environ.get("PAPER_DEFAULT_YEAR")
     if raw and raw.strip().isdigit():

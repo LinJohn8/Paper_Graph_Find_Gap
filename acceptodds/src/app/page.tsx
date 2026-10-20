@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { PaperExplorer } from '@/components/PaperExplorer';
 import { load } from '@/lib/paper-api';
-import { parseYearInfo, resolveYear } from '@/lib/years';
+import { ALL_YEARS, isAllYears, parseYearInfo, resolveYear } from '@/lib/years';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Paper Graph', description: 'Local research paper explorer' };
@@ -15,10 +15,13 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
   // a fresh install should open on the newest year that has papers.
   const registry = await load('/api/venues');
   const info = parseYearInfo(registry);
+  // `year=all` is a string sentinel, not a year: pass it through untouched so the
+  // explorer can query the whole corpus. Anything else resolves as before.
+  const requestedYear = one(params.year);
   return (
     <PaperExplorer
       venue={one(params.venue) ?? 'all'}
-      year={resolveYear(one(params.year), info)}
+      year={isAllYears(requestedYear) ? ALL_YEARS : resolveYear(requestedYear, info)}
       yearInfo={info}
       status={one(params.status) ?? ''}
       sort={one(params.sort) ?? 'recent'}

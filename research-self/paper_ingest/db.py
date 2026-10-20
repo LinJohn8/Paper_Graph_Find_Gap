@@ -108,6 +108,15 @@ def init_db(path: Path | None = None) -> None:
           PRIMARY KEY(venue, year)
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(paper_id UNINDEXED, title, abstract, authors, keywords, venue, tokenize='unicode61');
+        -- Whole-corpus ("all years") layout. graph_points holds ONE venue-year's
+        -- t-SNE layout, and those 48-dim SVD spaces are fitted per cell, so cells
+        -- are not comparable and cannot simply be overlaid. This table keeps a
+        -- single globally fitted semantic space and its 2D projection instead.
+        CREATE TABLE IF NOT EXISTS graph_points_global (
+          paper_id TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+          x REAL NOT NULL, y REAL NOT NULL, cluster INTEGER, region INTEGER,
+          vector_json TEXT, built_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS paper_venues_year_idx ON paper_venues(venue_id, year);
         CREATE INDEX IF NOT EXISTS papers_status_idx ON papers(status);
         """)

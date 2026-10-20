@@ -4,6 +4,7 @@ import json
 import hashlib
 import re
 import sqlite3
+import time
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -173,16 +174,24 @@ async def sync_many(keys: list[str], year: int, **options: Any) -> list[dict[str
     return results
 
 
-def list_papers(*, venue: str | None = None, year: int | None = None, keyword: str | None = None,
+def list_papers(*, venue: str | None = None, year: int | str | None = None, keyword: str | None = None,
                 status: str | None = None, page: int = 1, page_size: int = 50, sort: str = "recent") -> dict[str, Any]:
-    year = years.resolve(year)
+    # `year="all"` is the whole corpus: no year predicate at all. Anything else
+    # resolves to a concrete year exactly as before.
+    all_years = years.is_all(year)
+    if not all_years:
+        year = years.resolve(year)
     venue = None if venue == "all" else venue
     db.init_db()
     clauses, args = [], []
     if venue:
-        clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=? AND pv.year=?)")
-        args.extend([venue,year])
-    else:
+        if all_years:
+            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)")
+            args.append(venue)
+        else:
+            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=? AND pv.year=?)")
+            args.extend([venue,year])
+    elif not all_years:
         clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.year=?)")
         args.append(year)
     if status:
@@ -191,7 +200,9 @@ def list_papers(*, venue: str | None = None, year: int | None = None, keyword: s
     if keyword:
         clauses.append("p.id IN (SELECT paper_id FROM papers_fts WHERE papers_fts MATCH ?)")
         args.append(keyword.replace('"',''))
-    where = " WHERE " + " AND ".join(clauses)
+    # With `year=all` and no venue every predicate is optional, which leaves the
+    # clause list empty; emitting a bare "WHERE" there is a syntax error.
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     order = {"recent":"p.updated_at_source DESC,p.title COLLATE NOCASE", "title":"p.title COLLATE NOCASE", "year":"coalesce(p.publication_year,p.submission_year) DESC"}.get(sort,"p.updated_at_source DESC,p.title COLLATE NOCASE")
     with db.connect() as con:
         total = con.execute("SELECT count(*) FROM papers p"+join+where,args).fetchone()[0]
@@ -204,30 +215,127 @@ def list_papers(*, venue: str | None = None, year: int | None = None, keyword: s
     return {"items":output,"total":total,"page":page,"page_size":page_size,"pages":max(1,(total+page_size-1)//page_size)}
 
 
-def graph(venue: str | None = None, year: int | None = None) -> dict[str, Any]:
-    year = years.resolve(year)
+#: Payload cache for the map endpoint. The browser re-requests the graph on mount,
+#: on filter changes and on focus; rebuilding a 5-70k point payload per request is
+#: the single biggest cost on this path. Entries hold only the vector-free payload
+#: (vectors would be tens of MB for the whole corpus and are never sent to the map).
+_GRAPH_CACHE: dict[tuple, tuple[float, dict[str, Any]]] = {}
+GRAPH_CACHE_TTL = 600.0
+GRAPH_CACHE_MAX = 8
+
+
+def clear_graph_cache() -> None:
+    """Drop cached graph payloads (used by tests and after a corpus rebuild)."""
+    _GRAPH_CACHE.clear()
+
+
+def graph(venue: str | None = None, year: int | str | None = None, *,
+          include_vectors: bool = False, use_cache: bool = True) -> dict[str, Any]:
+    """Map payload for one venue-year, or for the whole corpus when ``year="all"``.
+
+    The base payload deliberately omits ``vectors`` (48 floats per paper, ~44x the
+    rest of the payload) and ``titles``; the map fetches titles lazily and only the
+    minimap needs vectors. ``include_vectors=True`` restores both for internal
+    callers and the explicit ``?include=full`` request.
+    """
+    all_years = years.is_all(year)
+    if not all_years:
+        year = years.resolve(year)
     venue = None if venue == "all" else venue
+    cache_key = ("graph", venue or "all", years.ALL_YEARS if all_years else year)
+    if use_cache and not include_vectors:
+        hit = _GRAPH_CACHE.get(cache_key)
+        if hit is not None and time.time() - hit[0] < GRAPH_CACHE_TTL:
+            return hit[1]
     db.init_db()
     with db.connect() as con:
-        sql="""SELECT DISTINCT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,g.vector_json FROM graph_points g
-          JOIN papers p ON p.id=g.paper_id JOIN paper_venues pv ON pv.paper_id=p.id WHERE pv.year=?"""
-        args: list[Any]=[year]
-        if venue:
-            sql+=" AND pv.venue_id=?";args.append(venue)
-        sql+=" ORDER BY p.id"
-        rows=con.execute(sql,args).fetchall()
+        if all_years:
+            # One globally fitted layout (graph_points_global): per-venue-year
+            # layouts live in different SVD bases and cannot be overlaid.
+            sql=("""SELECT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,g.vector_json,
+                    (SELECT max(pv2.year) FROM paper_venues pv2 WHERE pv2.paper_id=p.id) AS point_year
+                    FROM graph_points_global g JOIN papers p ON p.id=g.paper_id WHERE 1=1""")
+            args: list[Any]=[]
+            if venue:
+                sql+=" AND EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)"
+                args.append(venue)
+            sql+=" ORDER BY p.id"
+            rows=con.execute(sql,args).fetchall()
+            topic_venue=venue or "all"
+        else:
+            sql="""SELECT DISTINCT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,g.vector_json
+              FROM graph_points g JOIN papers p ON p.id=g.paper_id JOIN paper_venues pv ON pv.paper_id=p.id WHERE pv.year=?"""
+            args=[year]
+            if venue:
+                sql+=" AND pv.venue_id=?";args.append(venue)
+            sql+=" ORDER BY p.id"
+            rows=con.execute(sql,args).fetchall()
+            topic_venue=venue
         kinds=sorted({r["primary_area"] for r in rows if r["primary_area"]})
         area={v:i for i,v in enumerate(kinds)}
         topics={"region":[],"cluster":[]}
-        for level in topics:
-            if venue:
-                records=con.execute("SELECT DISTINCT number,label FROM graph_topics WHERE venue_id=? AND level=? ORDER BY number",(venue,level))
+        if topic_venue:
+            for level in topics:
+                records=con.execute("SELECT DISTINCT number,label FROM graph_topics WHERE venue_id=? AND level=? ORDER BY number",(topic_venue,level))
                 topics[level]=[dict(r) for r in records]
-        return {"kind":venue or "all","slugs":[r["id"] for r in rows],"titles":{r["id"]:r["title"] for r in rows},
-                "x":[r["x"] for r in rows],"y":[r["y"] for r in rows],"region":[r["region"] for r in rows],
-                "cluster":[r["cluster"] for r in rows],"areas":kinds,"area":[area.get(r["primary_area"]) for r in rows],
-                "regions":topics["region"],"clusters":topics["cluster"],
-                "vectors":[json.loads(r["vector_json"]) if r["vector_json"] else None for r in rows]}
+    payload: dict[str, Any] = {
+        "kind": venue or "all",
+        "slugs":[r["id"] for r in rows],
+        # Four decimals is ~1/10000 of the map's full span: visually exact at any
+        # zoom, and it roughly halves the payload compared with full float repr
+        # (73,675 points x 2 axes).
+        "x":[round(float(r["x"]),4) for r in rows],
+        "y":[round(float(r["y"]),4) for r in rows],
+        "region":[r["region"] for r in rows],
+        "cluster":[r["cluster"] for r in rows],
+        "areas":kinds,
+        "area":[area.get(r["primary_area"]) for r in rows],
+        "regions":topics["region"],
+        "clusters":topics["cluster"],
+        "year_mode":"all" if all_years else "single",
+    }
+    if all_years:
+        payload["years"]=[r["point_year"] for r in rows]
+    if include_vectors:
+        payload["titles"]={r["id"]:r["title"] for r in rows}
+        payload["vectors"]=[json.loads(r["vector_json"]) if r["vector_json"] else None for r in rows]
+    if use_cache and not include_vectors:
+        if len(_GRAPH_CACHE) >= GRAPH_CACHE_MAX:
+            _GRAPH_CACHE.clear()
+        _GRAPH_CACHE[cache_key] = (time.time(), payload)
+    return payload
+
+
+def graph_titles(venue: str | None = None, year: int | str | None = None,
+                 slugs: list[str] | None = None) -> dict[str, str]:
+    """Titles for a graph scope, optionally only for ``slugs``.
+
+    Large maps cannot afford the full title map up front, so the browser asks for
+    the handful of slugs it is about to label; the filter happens in SQL rather
+    than by building the whole dict and discarding it.
+    """
+    all_years = years.is_all(year)
+    if not all_years:
+        year = years.resolve(year)
+    venue = None if venue == "all" else venue
+    db.init_db()
+    wanted = [s for s in (slugs or []) if s][:500]
+    with db.connect() as con:
+        clauses: list[str] = []
+        args: list[Any] = []
+        if all_years:
+            clauses.append("EXISTS (SELECT 1 FROM graph_points_global g WHERE g.paper_id=p.id)")
+        else:
+            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.year=?)")
+            args.append(year)
+        if venue:
+            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)")
+            args.append(venue)
+        if wanted:
+            clauses.append(f"p.id IN ({','.join('?' * len(wanted))})")
+            args.extend(wanted)
+        sql = "SELECT p.id, p.title FROM papers p WHERE " + " AND ".join(clauses)
+        return {row["id"]: row["title"] for row in con.execute(sql, args)}
 
 
 def _graph_docs(rows: list[sqlite3.Row]) -> list[str]:

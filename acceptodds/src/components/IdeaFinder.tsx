@@ -1,8 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Gap, GapsResult, SemanticItem, SemanticResult, TopicSummary } from '@/lib/paper-types';
+import { formatCitations, type CopyFormat } from '@/lib/copy-export';
+import { ALL_YEARS, yearLabel, yearSelectValues } from '@/lib/years';
 
 // Browser components must call same-origin `/api/...`: non-NEXT_PUBLIC env vars
 // are not inlined into the client bundle, so this used to become `undefined` and
@@ -12,6 +14,15 @@ import type { Gap, GapsResult, SemanticItem, SemanticResult, TopicSummary } from
 const API = typeof window === 'undefined' ? (process.env.PAPER_API_URL ?? 'http://127.0.0.1:8000') : '';
 
 type Tab = 'search' | 'gaps';
+/** A search scope is a concrete year, or the whole corpus. */
+type Scope = number | typeof ALL_YEARS;
+
+const COPY_ACTIONS: [CopyFormat, string][] = [
+  ['markdown', 'Markdown 链接'],
+  ['titles', '标题'],
+  ['urls', '链接'],
+  ['bibtex', 'BibTeX'],
+];
 
 const GAP_LABEL: Record<Gap['type'], string> = {
   bridge: 'Bridge',
@@ -31,7 +42,7 @@ export function IdeaFinder() {
   // Start on the viewer's current year and replace it with the backend's real
   // default as soon as `/api/venues` answers. Hardcoding a placeholder year meant
   // this panel opened on a year with no papers.
-  const [year, setYear] = useState<number>(() => new Date().getFullYear());
+  const [year, setYear] = useState<Scope>(() => new Date().getFullYear());
   const [yearChoices, setYearChoices] = useState<number[]>([]);
 
   const [activeTab, setActiveTab] = useState<Tab>('search');
@@ -39,6 +50,11 @@ export function IdeaFinder() {
   const [results, setResults] = useState<SemanticItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+
+  /** Slugs the reader has ticked, and the transient "copied N" confirmation. */
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [copied, setCopied] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
 
   const [gaps, setGaps] = useState<Gap[]>([]);
   const [topics, setTopics] = useState<TopicSummary[]>([]);
@@ -80,6 +96,8 @@ export function IdeaFinder() {
         body: JSON.stringify({
           query: query.trim(),
           ...(venue.trim() ? { venue: venue.trim() } : {}),
+          // `all` asks the backend for the whole corpus, which it ranks against a
+          // single globally fitted model; a number keeps the per-year behaviour.
           year,
           limit: 20,
         }),
@@ -91,12 +109,59 @@ export function IdeaFinder() {
       const data = (await response.json()) as SemanticResult;
       setResults(data.items ?? []);
       setNote(data.note ?? null);
+      setSelected(new Set());
     } catch {
       setResults([]);
     } finally {
       setSearching(false);
     }
   }
+
+  /** Items a copy action applies to: the ticked ones, or every result when none are ticked. */
+  const chosen = useMemo(
+    () => (selected.size > 0 ? results.filter((item) => selected.has(item.slug || item.id)) : results),
+    [results, selected],
+  );
+
+  const toggle = useCallback((slug: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  }, []);
+
+  const copy = useCallback(
+    async (format: CopyFormat, label: string) => {
+      setCopyError(null);
+      if (!chosen.length) return;
+      const text = formatCitations(chosen, format, typeof window === 'undefined' ? '' : location.origin);
+      const done = `${label} · 已复制 ${chosen.length} 条`;
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          // Older browsers (and some non-secure contexts) have no async clipboard.
+          const area = document.createElement('textarea');
+          area.value = text;
+          area.setAttribute('readonly', '');
+          area.style.position = 'fixed';
+          area.style.opacity = '0';
+          document.body.appendChild(area);
+          area.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(area);
+          if (!ok) throw new Error('execCommand copy refused');
+        }
+        setCopied(done);
+        setTimeout(() => setCopied(null), 2500);
+      } catch {
+        setCopyError('无法访问剪贴板，请手动选择文本复制。');
+      }
+    },
+    [chosen],
+  );
 
   async function loadGaps(targetYear: number) {
     setGapsLoading(true);
@@ -124,6 +189,9 @@ export function IdeaFinder() {
   }
 
   useEffect(() => {
+    // Gap scanning compares one fixed corpus; the whole-corpus scope would never
+    // return, so the tab is unavailable there and the panel is not requested.
+    if (year === ALL_YEARS) return;
     let cancelled = false;
     void (async () => {
       await Promise.resolve();
@@ -134,6 +202,12 @@ export function IdeaFinder() {
       cancelled = true;
     };
   }, [year]);
+
+  const gapsDisabled = year === ALL_YEARS;
+  const options = useMemo(
+    () => yearSelectValues({ defaultYear: 0, availableYears: yearChoices, currentYear: 0 }, year),
+    [yearChoices, year],
+  );
 
   const venueLine = (item: SemanticItem) =>
     (item.venues ?? [])
@@ -153,7 +227,15 @@ export function IdeaFinder() {
         <button
           type="button"
           onClick={() => setActiveTab('gaps')}
-          className={activeTab === 'gaps' ? 'border-b-2 border-ink pb-1 font-medium' : 'text-subtle'}
+          disabled={gapsDisabled}
+          title={gapsDisabled ? 'Gap scanning needs a single year' : undefined}
+          className={
+            gapsDisabled
+              ? 'cursor-not-allowed text-muted'
+              : activeTab === 'gaps'
+                ? 'border-b-2 border-ink pb-1 font-medium'
+                : 'text-subtle'
+          }
         >
           Research gaps
         </button>
@@ -185,14 +267,15 @@ export function IdeaFinder() {
             <label className="flex flex-col text-sm">
               <span className="text-subtle">Year</span>
               <select
-                value={year}
-                onChange={(e) => setYear(Number(e.target.value))}
+                aria-label="Year scope"
+                value={String(year)}
+                onChange={(e) => setYear(e.target.value === ALL_YEARS ? ALL_YEARS : Number(e.target.value))}
                 className="mt-1 border border-frame bg-card px-3 py-2"
               >
-                {(yearChoices.includes(year) ? yearChoices : [year, ...yearChoices]).map((y) => (
-                  <option key={y} value={y}>
-                    {y}
-                    {yearChoices.includes(y) ? '' : ' (no data)'}
+                {options.map((y) => (
+                  <option key={y} value={String(y)}>
+                    {yearLabel(y)}
+                    {typeof y === 'number' && !yearChoices.includes(y) ? ' (no data)' : ''}
                   </option>
                 ))}
               </select>
@@ -210,26 +293,105 @@ export function IdeaFinder() {
           {note === 'keyword fallback' && (
             <p className="mt-3 text-xs text-subtle">keyword fallback (no semantic model yet)</p>
           )}
+          {note && note !== 'keyword fallback' && <p className="mt-3 text-xs text-subtle">{note}</p>}
 
-          <div className="mt-5 divide-y divide-rule border-y border-rule">
-            {results.map((item) => (
-              <article key={item.id} className="py-5">
-                <div className="flex items-start justify-between gap-3">
-                  <h2 className="font-serif text-xl leading-snug">
-                    <Link href={`/papers/${encodeURIComponent(item.id)}`} className="hover:underline">
-                      {item.title}
-                    </Link>
-                  </h2>
-                  <span className="shrink-0 rounded border border-frame px-2 py-1 text-xs text-subtle">
-                    {item.score.toFixed(2)}
-                  </span>
-                </div>
-                <p className="mt-1 text-sm text-subtle">
-                  {item.authors.join(', ') || 'Authors not provided'} · {venueLine(item)} · {item.year}
-                </p>
-                {item.abstract && <p className="mt-2 line-clamp-3 text-sm leading-relaxed">{item.abstract}</p>}
-              </article>
-            ))}
+          {results.length > 0 && (
+            <div className="sticky top-0 z-10 mt-5 border-y border-rule bg-bg/95 py-2 backdrop-blur">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+                <span className="text-subtle">
+                  {selected.size > 0
+                    ? `已选 ${selected.size} / ${results.length} 条`
+                    : `${results.length} 条结果 · 未选中时复制全部`}
+                </span>
+                <button
+                  type="button"
+                  className="text-subtle underline hover:text-ink"
+                  onClick={() =>
+                    setSelected(
+                      selected.size === results.length ? new Set() : new Set(results.map((r) => r.slug || r.id)),
+                    )
+                  }
+                >
+                  {selected.size === results.length ? '清除选择' : '全选'}
+                </button>
+                {selected.size > 0 && (
+                  <button
+                    type="button"
+                    className="text-subtle underline hover:text-ink"
+                    onClick={() => setSelected(new Set())}
+                  >
+                    清除
+                  </button>
+                )}
+                <span className="text-muted">复制为：</span>
+                {COPY_ACTIONS.map(([format, label]) => (
+                  <button
+                    key={format}
+                    type="button"
+                    disabled={!chosen.length}
+                    onClick={() => void copy(format, label)}
+                    className="border border-frame bg-card px-2 py-1 text-xs hover:border-ink disabled:opacity-50"
+                  >
+                    {label}
+                  </button>
+                ))}
+                {copied && <span className="text-xs text-accent">{copied}</span>}
+                {copyError && <span className="text-xs text-accent">{copyError}</span>}
+              </div>
+            </div>
+          )}
+
+          <div className="mt-2 divide-y divide-rule border-y border-rule">
+            {results.map((item) => {
+              const slug = item.slug || item.id;
+              const ticked = selected.has(slug);
+              return (
+                <article key={item.id} className="flex items-start gap-3 py-5">
+                  <input
+                    type="checkbox"
+                    className="mt-2 shrink-0"
+                    aria-label={`Select ${item.title}`}
+                    checked={ticked}
+                    onChange={() => toggle(slug)}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <h2 className="font-serif text-xl leading-snug">
+                        <Link href={`/papers/${encodeURIComponent(item.id)}`} className="hover:underline">
+                          {item.title}
+                        </Link>
+                      </h2>
+                      <span className="shrink-0 rounded border border-frame px-2 py-1 text-xs text-subtle">
+                        {item.score.toFixed(2)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-subtle">
+                      {item.authors.join(', ') || 'Authors not provided'} · {venueLine(item)} · {item.year}
+                    </p>
+                    {item.abstract && <p className="mt-2 line-clamp-3 text-sm leading-relaxed">{item.abstract}</p>}
+                    {(item.paper_url || item.doi) && (
+                      <p className="mt-2 flex gap-4 text-xs">
+                        {item.paper_url && (
+                          <a href={item.paper_url} target="_blank" rel="noreferrer" className="underline">
+                            Original source
+                          </a>
+                        )}
+                        {item.doi && (
+                          <a
+                            href={item.doi.startsWith('http') ? item.doi : `https://doi.org/${item.doi}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline"
+                          >
+                            DOI
+                          </a>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
           </div>
 
           {!searching && !results.length && (
@@ -244,7 +406,11 @@ export function IdeaFinder() {
         <section className="mt-5">
           <div className="flex items-center justify-between">
             <h2 className="font-serif text-lg">Research gaps for {year}</h2>
-            <button type="button" onClick={() => void loadGaps(year)} className="text-sm text-subtle hover:underline">
+            <button
+              type="button"
+              onClick={() => year !== ALL_YEARS && void loadGaps(year)}
+              className="text-sm text-subtle hover:underline"
+            >
               Refresh
             </button>
           </div>
