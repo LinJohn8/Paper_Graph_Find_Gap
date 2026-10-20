@@ -120,6 +120,109 @@ def _build_expansion() -> tuple[re.Pattern[str], dict[str, str]]:
 _EXPAND_PATTERN, _EXPANSION_MAP = _build_expansion()
 
 
+# --------------------------------------------------------------------------- #
+# 1.1b Cross-language query terms (Chinese -> English academic surface forms)   #
+# --------------------------------------------------------------------------- #
+# The corpus is English; a reader typing Chinese in the idea finder previously
+# got zero query terms in the vocabulary, so every search degraded to keyword
+# matching and returned little. These are *query-side* bridges only: they are
+# applied to what the user types, never to stored documents, so the fitted model
+# and existing vectors stay valid. Longest key first so "大语言模型" wins over
+# "语言模型" and "图神经网络" over "神经网络".
+ZH_TERMS: dict[str, str] = {
+    "大语言模型": "large language model", "语言模型": "language model",
+    "大模型": "large language model", "多模态": "multimodal",
+    "深度学习": "deep learning", "机器学习": "machine learning",
+    "强化学习": "reinforcement learning", "自监督": "self supervised learning",
+    "半监督": "semi supervised", "无监督": "unsupervised", "监督学习": "supervised learning",
+    "迁移学习": "transfer learning", "元学习": "meta learning", "联邦学习": "federated learning",
+    "持续学习": "continual learning", "增量学习": "incremental learning",
+    "对比学习": "contrastive learning", "表示学习": "representation learning",
+    "图神经网络": "graph neural network", "神经网络": "neural network",
+    "卷积": "convolutional", "注意力机制": "attention mechanism", "注意力": "attention",
+    "变换器": "transformer", "扩散模型": "diffusion model", "扩散": "diffusion",
+    "生成对抗": "generative adversarial network", "生成模型": "generative model",
+    "生成": "generation", "重建": "reconstruction", "分割": "segmentation",
+    "检测": "detection", "识别": "recognition", "检索": "retrieval",
+    "推荐系统": "recommender system", "推荐": "recommendation",
+    "知识图谱": "knowledge graph", "知识蒸馏": "knowledge distillation",
+    "蒸馏": "distillation", "量化": "quantization", "剪枝": "pruning",
+    "压缩": "compression", "推理": "inference", "训练": "training",
+    "微调": "fine tuning", "预训练": "pretraining", "提示学习": "prompting",
+    "提示": "prompt", "对齐": "alignment", "幻觉": "hallucination",
+    "可解释": "interpretability", "鲁棒": "robustness", "鲁棒性": "robustness",
+    "公平性": "fairness", "隐私": "privacy", "安全": "security",
+    "对抗攻击": "adversarial attack", "对抗": "adversarial",
+    "三维": "3d", "场景": "scene", "点云": "point cloud", "渲染": "rendering",
+    "图像": "image", "视频": "video", "语音": "speech", "音频": "audio",
+    "文本": "text", "自然语言处理": "natural language processing",
+    "计算机视觉": "computer vision", "机器翻译": "machine translation",
+    "目标检测": "object detection", "图像分割": "image segmentation",
+    "姿态估计": "pose estimation", "动作识别": "action recognition",
+    "时间序列": "time series", "预测": "prediction", "优化": "optimization",
+    "采样": "sampling", "采样效率": "sample efficiency", "效率": "efficiency",
+    "加速": "acceleration", "并行": "parallel", "分布式": "distributed",
+    "贝叶斯": "bayesian", "概率": "probabilistic", "不确定性": "uncertainty",
+    "因果": "causal", "推理能力": "reasoning", "推理链": "chain of thought",
+    "思维链": "chain of thought", "智能体": "agent", "多智能体": "multi agent",
+    "工具调用": "tool use", "规划": "planning", "决策": "decision making",
+    "机器人": "robot", "具身智能": "embodied ai", "自动驾驶": "autonomous driving",
+    "医学图像": "medical image", "生物信息": "bioinformatics", "分子": "molecule",
+    "药物": "drug", "蛋白质": "protein", "材料": "materials", "气候": "climate",
+    "能源": "energy", "金融": "financial", "教育": "education",
+    "评估": "evaluation", "基准": "benchmark", "数据集": "dataset",
+    "泛化能力": "generalization", "泛化": "generalization", "过拟合": "overfitting",
+    "稀疏": "sparse", "稠密": "dense", "轻量化": "lightweight", "模型压缩": "model compression",
+    "边缘计算": "edge computing", "长文本": "long context", "上下文": "context",
+    "记忆": "memory", "检索增强": "retrieval augmented generation",
+    "问答": "question answering", "摘要": "summarization", "翻译": "translation",
+    "情感分析": "sentiment analysis", "命名实体": "named entity",
+    "语音识别": "speech recognition", "合成": "synthesis", "编辑": "editing",
+    "风格迁移": "style transfer", "超分辨率": "super resolution", "去噪": "denoising",
+}
+
+_ZH_PATTERN = re.compile("|".join(re.escape(k) for k in sorted(ZH_TERMS, key=len, reverse=True)))
+
+
+def expand_chinese(text: str) -> str:
+    """Append English equivalents of any Chinese academic terms in ``text``.
+
+    The original text is kept (harmless: its characters match no vocabulary term)
+    and the English surface forms are appended, so the query can reach the English
+    corpus. Idempotent: running it again finds the same terms and appends the same
+    suffix, which is then already present, so the result stops changing.
+    """
+    if not text or not re.search(r"[\u4e00-\u9fff]", text):
+        return text
+    found: list[str] = []
+
+    def swap(match: re.Match[str]) -> str:
+        english = ZH_TERMS[match.group(0)]
+        if english not in found:
+            found.append(english)
+        return match.group(0)
+
+    _ZH_PATTERN.sub(swap, text)
+    if not found:
+        return text
+    # Only add terms that are not already in the text, so a second pass is a no-op.
+    lowered = text.lower()
+    missing = [e for e in found if e not in lowered]
+    if not missing:
+        return text
+    return text + " " + " ".join(missing)
+
+
+def query_document(text: str) -> str:
+    """Normalise a *query* string: Chinese bridge, then alias expansion.
+
+    Documents are indexed with :func:`expand_aliases` only. Query-side extra
+    bridging is safe because it adds terms to the query vector without changing
+    the fitted vector space.
+    """
+    return expand_aliases(expand_chinese(text))
+
+
 def expand_aliases(text: str) -> str:
     """Token-level, word-boundary-safe alias expansion (case-insensitive).
 

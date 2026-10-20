@@ -267,7 +267,7 @@ def semantic_search(body:dict):
         # render them identically (slug/year/score are required by the UI).
         return _semantic_items_from_keyword(query,venue,year,limit,"keyword fallback")
     try:
-        qvec=np.asarray(model.transform([semantics.expand_aliases(query)])[0],dtype=float).ravel()
+        qvec=np.asarray(model.transform([semantics.query_document(query)])[0],dtype=float).ravel()
     except Exception:
         return _semantic_items_from_keyword(query,venue,year,limit,"keyword fallback (semantic query failed)")
     if qvec.size<2 or not np.isfinite(qvec).all():
@@ -404,9 +404,21 @@ def _semantic_search_all_years(query:str,venue:str|None,limit:int)->dict:
     reused because each venue-year has its own SVD basis.
     """
     hits=global_layout.search(query,limit=limit,venue=venue)
-    if not hits:
+    mode=(hits[0].get("mode") if hits else None)
+    if mode=="unavailable":
+        # The global index genuinely is not built (no pkl/npz on disk).
         return _semantic_items_from_keyword(query,venue,years.default_year(),limit,
                                             "keyword fallback (whole-corpus semantic index unavailable)")
+    if not hits or mode=="keyword":
+        # The model has no term in common with the query (a typo, only stopwords,
+        # or Chinese the bridge does not cover). That is a normal miss, not an
+        # outage: report it as such so it never reads as a broken deployment.
+        fallback=_semantic_items_from_keyword(query,venue,years.default_year(),limit,
+                                              "keyword fallback (no query term in the semantic vocabulary)")
+        fallback["method"]="keyword-fallback"
+        fallback["note"]=("没有匹配到这个语义模型能理解的研究术语（可能是拼写错误、全是停用词，"
+                          "或中文术语未被词表覆盖）。请换用英文研究术语再试。")
+        return fallback
     with db.connect() as con:
         items=[]
         for hit in hits:
@@ -427,6 +439,11 @@ def _semantic_search_all_years(query:str,venue:str|None,limit:int)->dict:
     if not items:
         return _semantic_items_from_keyword(query,venue,years.default_year(),limit,
                                             "keyword fallback (no scored papers)")
+    if mode=="keyword":
+        return {"items":items,"method":"keyword-fallback",
+                "note":("这些词不在语义模型的词表里（中文、拼写错误或全是停用词），已按词面匹配返回。"
+                        "用英文研究术语检索效果最好。"),
+                "query":query}
     return {"items":items,"method":"semantic-svd-global",
             "note":"whole-corpus model (all years), one global semantic space","query":query}
 

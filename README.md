@@ -30,6 +30,10 @@ Idea Finder — type an idea, get the most relevant papers across the whole corp
 
 ![Idea Finder with ranked results and the copy toolbar](docs/screenshots/idea-finder.png)
 
+The same search in Chinese. Chinese academic terms are bridged to their English surface forms on the query side (`扩散模型` → `diffusion model`, `三维场景` → `3d scene`), so a Chinese question reaches the English corpus; the fitted model and stored vectors are untouched:
+
+![Idea Finder answering a Chinese query](docs/screenshots/idea-finder-chinese.png)
+
 Research gaps — under-combined topic pairs, under-explored areas and explicitly stated gaps, per year:
 
 ![Research gaps panel for 2025](docs/screenshots/research-gaps.png)
@@ -38,9 +42,17 @@ Research gaps — under-combined topic pairs, under-explored areas and explicitl
 
 **All years.** Every year control (`/` and `/map`) accepts `year=all`: the list pages through the whole corpus, and the map plots it in one space. Per-venue-year maps keep their own layout, which is correct for comparing papers *within* a year. Use `python -m paper_ingest.global_layout` to (re)build the global model after a corpus change; it writes `Data/graph/all_all_semantic.pkl`, `Data/graph/all_all_vectors.npz` and the `graph_points_global` table (~3 min for 73k papers).
 
-**Idea finder** (`/ideas`) ranks the corpus against a free-text idea. With *All years* it scores every paper in the global space (one matrix–vector product over the cached float32 matrix), otherwise it uses that year's fitted model. Each hit is selectable, and the sticky toolbar copies the selection — or every result when nothing is ticked — as **Markdown links**, **titles**, **plain URLs** or **BibTeX**. Link preference is the publisher landing page, then `https://doi.org/<doi>`, then this app's `/papers/<slug>` page.
+**Idea finder** (`/ideas`) ranks the corpus against a free-text idea, in English or Chinese. With *All years* it scores every paper in the global space (one matrix–vector product over the cached float32 matrix), otherwise it uses that year's fitted model. Each hit is selectable, and the sticky toolbar copies the selection — or every result when nothing is ticked — as **Markdown links**, **titles**, **plain URLs** or **BibTeX**. Link preference is the publisher landing page, then `https://doi.org/<doi>`, then this app's `/papers/<slug>` page.
 
 A first search in a given scope takes ~20 s because it builds that scope's vector matrix; later searches in the same scope are ~2 s from cache. The gaps tab only scans when you open it (20–30 s for a full year, then cached), and it is disabled for the all-years scope, where a quadratic comparison is not meaningful.
+
+Three honest outcomes are reported separately rather than collapsing into one scary error:
+
+| Situation | `method` | What the UI says |
+|---|---|---|
+| Normal semantic ranking | `semantic-svd` / `semantic-svd-global` | the results, with scores |
+| Query shares no term with the vocabulary (typo, only stopwords) | `keyword-fallback` | "没有匹配到这个语义模型能理解的研究术语…请换用英文研究术语再试" and word-matched hits if any |
+| The global index was never built | `keyword-fallback` | "whole-corpus semantic index unavailable" — run `python -m paper_ingest.global_layout` |
 
 ## Map performance notes
 

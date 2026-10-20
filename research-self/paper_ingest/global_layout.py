@@ -29,6 +29,7 @@ Run it with::
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -232,27 +233,78 @@ def load_index(*, refresh: bool = False):
 
 
 def search(query: str, *, limit: int = 20, venue: str | None = None) -> list[dict[str, Any]]:
-    """Rank the whole corpus against ``query``; returns id/score/year triples."""
+    """Rank the whole corpus against ``query``; returns id/score/year dicts.
+
+    Every row carries ``mode`` so callers can tell a real semantic ranking from a
+    degraded word match:
+
+    * ``semantic``    - normal cosine ranking;
+    * ``keyword``     - the query shared no term with the model's vocabulary (a
+      fully Chinese query, a typo, or only stopwords), so title/abstract word
+      matching was used instead;
+    * ``unavailable`` - the global index has not been built.
+    """
     index = load_index()
     if index is None:
-        return []
+        return [{"mode": "unavailable"}]
     ids, vectors, years, model = index
-    query_vector = np.asarray(model.transform([semantics.expand_aliases(query)])[0], dtype=np.float32).ravel()
+    # query_document() adds the Chinese->English bridge and alias expansion, so a
+    # Chinese idea reaches the English corpus instead of scoring zero everywhere.
+    query_vector = np.asarray(model.transform([semantics.query_document(query)])[0], dtype=np.float32).ravel()
     if query_vector.size != vectors.shape[1] or not np.isfinite(query_vector).all():
-        return []
+        return [{"mode": "unavailable"}]
     norm = float(np.linalg.norm(query_vector))
     if norm == 0:
-        return []
+        # Every term is out of vocabulary: cosine is 0 for all papers, so a "0.00"
+        # ranking would be meaningless. Word matching is the honest answer.
+        return _keyword_search(query, ids, years, limit=limit, venue=venue)
     scores = vectors @ (query_vector / norm)
     order = np.argsort(-scores)
     out: list[dict[str, Any]] = []
     for i in order:
         if venue and not _paper_in_venue(ids[int(i)], venue):
             continue
-        out.append({"id": ids[int(i)], "score": round(float(scores[int(i)]), 6), "year": int(years[int(i)])})
+        out.append({"id": ids[int(i)], "score": round(float(scores[int(i)]), 6),
+                    "year": int(years[int(i)]), "mode": "semantic"})
         if len(out) >= limit:
             break
     return out
+
+
+def _keyword_search(query: str, ids: list[str], years: np.ndarray, *,
+                    limit: int, venue: str | None) -> list[dict[str, Any]]:
+    """Word-match fallback for queries the semantic vocabulary cannot represent.
+
+    Tries FTS first; if that yields nothing (only stopwords, which FTS also drops)
+    it falls back to a LIKE scan so the reader still sees papers whose titles share
+    the words. Venue filtering happens in SQL so it cannot return out-of-scope rows.
+    """
+    terms = [t for t in re.findall(r"[\w\u4e00-\u9fff]+", query) if len(t) >= 2]
+    if not terms:
+        return []
+    rows: list[Any] = []
+    try:
+        with db.connect() as con:
+            venue_clause = " AND EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)" if venue else ""
+            venue_args: list[Any] = [venue] if venue else []
+            match = " OR ".join(f'"{t}"' for t in terms[:8])
+            rows = con.execute(
+                """SELECT p.id FROM papers p
+                   WHERE p.id IN (SELECT paper_id FROM papers_fts WHERE papers_fts MATCH ?)"""
+                + venue_clause + " LIMIT ?",
+                (match, *venue_args, limit),
+            ).fetchall()
+            if not rows:
+                like = " OR ".join(["p.title LIKE ?"] * min(len(terms), 4))
+                rows = con.execute(
+                    f"SELECT p.id FROM papers p WHERE ({like})" + venue_clause + " LIMIT ?",
+                    (*[f"%{t}%" for t in terms[:4]], *venue_args, limit),
+                ).fetchall()
+    except Exception:
+        rows = []
+    year_of = {pid: int(y) for pid, y in zip(ids, years)}
+    return [{"id": r["id"], "score": 0.0, "year": year_of.get(r["id"], 0), "mode": "keyword"}
+            for r in rows][:limit]
 
 
 _venue_membership: dict[str, set[str]] = {}
