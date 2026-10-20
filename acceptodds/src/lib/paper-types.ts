@@ -99,4 +99,6 @@ export interface TopicSummary {
 export interface GapsResult {
   gaps: Gap[];
   topics: TopicSummary[];
+  /** Why gap scanning produced nothing (e.g. the all-years scope is unsupported). */
+  note?: string | null;
 }

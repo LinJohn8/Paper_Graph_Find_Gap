@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -21,6 +22,18 @@ app=FastAPI(title="Paper Graph local API",version="0.1.0")
 # The map payload is thousands of coordinate numbers, so it compresses ~5-6x.
 # Without this the browser downloads and parses a multi-MB JSON document.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+#: Parsed vectors per semantic scope: (venue, year, model_venue) -> (row_count, ids, meta).
+#: Re-parsing a year's graph vectors from JSON cost ~17 s per search; the matrix is
+#: a property of the stored graph, so it is built once and reused until it changes.
+_SEMANTIC_VECTORS: dict[tuple, tuple[int, list[str], dict]] = {}
+_VECTOR_MATRICES: dict[tuple, "np.ndarray"] = {}
+#: Gap scans take 20-30 s per year and only change when the graph is rebuilt.
+_GAPS_CACHE: dict[tuple, tuple[float, dict]] = {}
+GAPS_CACHE_TTL = 3600.0
+#: Above this many papers a gap scan is refused: detect_gaps is quadratic in the
+#: corpus, so a whole-year 20k-paper scan is already at the practical limit.
+GAPS_MAX_PAPERS = 25_000
 
 @app.on_event("startup")
 def startup(): db.init_db()
@@ -281,43 +294,80 @@ def semantic_search(body:dict):
         # comparable when they were built for the same venue corpus; anything
         # else is re-embedded through the model that is actually in use.
         model_venue=(info or {}).get("venue")
-        scored:list[dict]=[]
-        pending:list[tuple[object,str]]=[]
-        for r in rows:
-            stored=None
-            if r["vector_json"]:
-                # graph_points is keyed by paper_id only, so a paper that belongs
-                # to several venues may carry a vector fitted on a different
-                # venue corpus. Only trust it when it was built for this venue.
-                if model_venue and (r["point_venue"] or "") == model_venue:
-                    try:
-                        stored=np.asarray(json.loads(r["vector_json"]),dtype=float).ravel()
-                    except Exception:
-                        stored=None
-            if stored is not None and stored.shape==qvec.shape:
-                score=float(_unit(stored)@qvec)
-                scored.append({"id":r["id"],"slug":r["id"],"title":r["title"],
-                               "abstract":r["abstract"],"authors":json_value(r["authors_json"]),
+        # Re-parsing 20k JSON vectors per request dominated this endpoint (~17 s
+        # for one year). The parsed matrix is cached per (scope, model) because it
+        # only changes when that venue-year's graph is rebuilt.
+        cache_key=(venue or "all",year,model_venue or "")
+        cached=_SEMANTIC_VECTORS.get(cache_key)
+        if cached is not None and cached[0]==len(rows):
+            ids,meta=cached[1],cached[2]
+            matrix=_VECTOR_MATRICES[cache_key]
+            scores=matrix@qvec.astype(np.float32)
+            scored=[]
+            for n,score in enumerate(scores):
+                rid=ids[n]
+                m=meta[rid]
+                scored.append({"id":rid,"slug":rid,"title":m["title"],
+                               "abstract":m["abstract"],"authors":m["authors"],
+                               "doi":m["doi"],"paper_url":m["paper_url"],"pdf_url":m["pdf_url"],
+                               "year":m["year"],"score":round(float(score),6)})
+            recovered=0
+        else:
+            # Cold scope: build and cache the vector matrix once.
+            scored=[]
+            pending:list[tuple[object,str]]=[]
+            ids:list[str]=[]
+            columns:list["np.ndarray"]=[]
+            meta:dict[str,dict]= {}
+            for r in rows:
+                stored=None
+                if r["vector_json"]:
+                    # graph_points is keyed by paper_id only, so a paper that
+                    # belongs to several venues may carry a vector fitted on a
+                    # different venue corpus. Only trust it for this venue.
+                    if model_venue and (r["point_venue"] or "") == model_venue:
+                        try:
+                            stored=np.asarray(json.loads(r["vector_json"]),dtype=float).ravel()
+                        except Exception:
+                            stored=None
+                if stored is not None and stored.shape==qvec.shape:
+                    ids.append(r["id"])
+                    columns.append(_unit(stored))
+                else:
+                    pending.append((r,_graph_docs([r])[0]))
+                meta[r["id"]]={"title":r["title"],"abstract":r["abstract"],
+                               "authors":json_value(r["authors_json"]),
                                "doi":r["doi"],"paper_url":r["paper_url"],"pdf_url":r["pdf_url"],
-                               "year":year,"score":round(score,6)})
-            else:
-                pending.append((r,_graph_docs([r])[0]))
-        recovered=0
-        if pending:
-            try:
-                vecs=np.asarray(model.transform([doc for _,doc in pending]),dtype=float)
-                for (r,_),v in zip(pending,vecs):
-                    v=np.asarray(v,dtype=float).ravel()
-                    if v.shape!=qvec.shape:
-                        continue
-                    score=float(_unit(v)@qvec)
-                    scored.append({"id":r["id"],"slug":r["id"],"title":r["title"],
-                                   "abstract":r["abstract"],"authors":json_value(r["authors_json"]),
-                                   "doi":r["doi"],"paper_url":r["paper_url"],"pdf_url":r["pdf_url"],
-                                   "year":year,"score":round(score,6)})
-                    recovered+=1
-            except Exception:
-                pass
+                               "year":year}
+            recovered=0
+            if pending:
+                try:
+                    vecs=np.asarray(model.transform([doc for _,doc in pending]),dtype=float)
+                    for (r,_),v in zip(pending,vecs):
+                        v=np.asarray(v,dtype=float).ravel()
+                        if v.shape!=qvec.shape:
+                            continue
+                        ids.append(r["id"])
+                        columns.append(_unit(v))
+                        recovered+=1
+                except Exception:
+                    pass
+            if columns:
+                matrix=np.vstack(columns).astype(np.float32)
+                if len(_SEMANTIC_VECTORS)>=6:
+                    _SEMANTIC_VECTORS.clear()
+                    _VECTOR_MATRICES.clear()
+                _SEMANTIC_VECTORS[cache_key]=(len(rows),ids,meta)
+                _VECTOR_MATRICES[cache_key]=matrix
+                scores=matrix@qvec.astype(np.float32)
+                scored=[]
+                for n,score in enumerate(scores):
+                    rid=ids[n]
+                    m=meta[rid]
+                    scored.append({"id":rid,"slug":rid,"title":m["title"],
+                                   "abstract":m["abstract"],"authors":m["authors"],
+                                   "doi":m["doi"],"paper_url":m["paper_url"],"pdf_url":m["pdf_url"],
+                                   "year":m["year"],"score":round(float(score),6)})
         # Attach the paper's full venue list (the UI renders it), scoped lookup.
         for item in scored:
             item["venues"]=[dict(v) for v in con.execute(
@@ -412,11 +462,22 @@ def gaps(venue:str|None=None,year:str|None=None):
         return {"gaps":[],"topics":[],
                 "note":"Gap scanning compares one fixed corpus; pick a year (and optionally a venue) instead of all years."}
     year = years.resolve(year)
+    # Scanning a year's graph is a 20-30 s computation; the answer only changes
+    # when the graph is rebuilt, so repeated tab switches are served from memory.
+    cache_key=(None if venue=="all" else venue, year)
+    hit=_GAPS_CACHE.get(cache_key)
+    if hit is not None and time.time()-hit[0]<GAPS_CACHE_TTL:
+        return hit[1]
     try:
-        return _gaps(venue,year)
+        result = _gaps(venue,year)
     except Exception as exc:
         # Degradation contract: never 500 when there is no usable graph/model.
         return {"gaps":[],"topics":[],"note":f"gap detection unavailable: {type(exc).__name__}: {exc}"}
+    if len(_GAPS_CACHE)>=6:
+        _GAPS_CACHE.clear()
+    _GAPS_CACHE[cache_key]=(time.time(),result)
+    return result
+
 def _gaps(venue:str|None,year:int)->dict:
     venue=None if venue=="all" else venue
     with db.connect() as con:

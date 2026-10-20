@@ -26,11 +26,21 @@ Paper detail — abstract, extracted research questions, stated gaps and related
 
 ![Paper detail page](docs/screenshots/paper-detail.png)
 
+Idea Finder — type an idea, get the most relevant papers across the whole corpus, tick the ones you want and copy them as Markdown links, titles, URLs or BibTeX:
+
+![Idea Finder with ranked results and the copy toolbar](docs/screenshots/idea-finder.png)
+
+Research gaps — under-combined topic pairs, under-explored areas and explicitly stated gaps, per year:
+
+![Research gaps panel for 2025](docs/screenshots/research-gaps.png)
+
 ## All-years mode and the idea finder
 
 **All years.** Every year control (`/` and `/map`) accepts `year=all`: the list pages through the whole corpus, and the map plots it in one space. Per-venue-year maps keep their own layout, which is correct for comparing papers *within* a year. Use `python -m paper_ingest.global_layout` to (re)build the global model after a corpus change; it writes `Data/graph/all_all_semantic.pkl`, `Data/graph/all_all_vectors.npz` and the `graph_points_global` table (~3 min for 73k papers).
 
 **Idea finder** (`/ideas`) ranks the corpus against a free-text idea. With *All years* it scores every paper in the global space (one matrix–vector product over the cached float32 matrix), otherwise it uses that year's fitted model. Each hit is selectable, and the sticky toolbar copies the selection — or every result when nothing is ticked — as **Markdown links**, **titles**, **plain URLs** or **BibTeX**. Link preference is the publisher landing page, then `https://doi.org/<doi>`, then this app's `/papers/<slug>` page.
+
+A first search in a given scope takes ~20 s because it builds that scope's vector matrix; later searches in the same scope are ~2 s from cache. The gaps tab only scans when you open it (20–30 s for a full year, then cached), and it is disabled for the all-years scope, where a quadratic comparison is not meaningful.
 
 ## Map performance notes
 
@@ -41,6 +51,7 @@ The map is usable at corpus scale because of four changes:
 - Titles are fetched lazily, debounced, only for the slugs about to be labelled (`/api/graph/titles?...&slugs=a,b,c`).
 - Above 25,000 points the map skips collision-tested topic labels and the worker re-layout during a search, both of which are per-frame costs that grow with the corpus.
 
+Two slow endpoints (`/api/papers/semantic`, `/api/gaps`) are Next.js route handlers rather than `next.config` rewrites: the rewrite proxy closes the connection with `socket hang up` past ~30 s, while a cold semantic search or a gap scan legitimately takes 20–40 s.
 
 ## Data coverage (2022–2026)
 

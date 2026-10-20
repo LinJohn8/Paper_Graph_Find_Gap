@@ -838,11 +838,23 @@ def detect_gaps(vectors: np.ndarray | None, labels: np.ndarray, abstracts: list[
                     cent = cent / norm
                 centroids[c] = cent
 
-        # Precompute the full similarity matrix ONCE. The old code recomputed
-        # `vectors @ vectors[p]` inside the cluster-pair loop, which is
-        # O(clusters^2 * n * d) on top of the already-quadratic pair scan.
-        sim_matrix = vectors @ vectors.T
-        np.fill_diagonal(sim_matrix, -np.inf)
+        # Nearest neighbours by cosine, computed in row chunks.
+        #
+        # The previous version materialised the whole n x n similarity matrix
+        # (`vectors @ vectors.T`). At 20k papers that is 400M float64 = 3.2 GB,
+        # which made /api/gaps for a single year take minutes and never return --
+        # it looked like "the button does nothing". Only the top `k` neighbours
+        # per row are ever read, so the matrix is never needed: each chunk costs
+        # chunk x n, which is bounded regardless of corpus size.
+        k = min(5, n - 1)
+        top_neighbours = np.empty((n, max(1, k)), dtype=np.int64)
+        for start in range(0, n, 2048):
+            stop = min(start + 2048, n)
+            block = vectors[start:stop] @ vectors.T
+            for offset in range(block.shape[0]):
+                block[offset, start + offset] = -np.inf
+            part = np.argpartition(-block, max(1, k) - 1, axis=1)[:, :max(1, k)]
+            top_neighbours[start:stop] = part
 
         big = [c for c, idx in members.items() if len(idx) >= sparse_size]
 
@@ -886,18 +898,18 @@ def detect_gaps(vectors: np.ndarray | None, labels: np.ndarray, abstracts: list[
                 # predict. Expected cross-links are estimated from cluster sizes
                 # (chance of a random neighbour landing in the other cluster);
                 # observed cross-links are counted from nearest neighbours.
-                k = 5
-                k = min(k, n - 1)
+                k_neigh = 5
+                k_neigh = min(k_neigh, n - 1)
                 observed = 0
                 for p in members[a]:
-                    top = np.argsort(-sim_matrix[p])[:k]
+                    top = top_neighbours[p][:k_neigh]
                     observed += sum(1 for t in top if int(labels[t]) == b)
                 for p in members[b]:
-                    top = np.argsort(-sim_matrix[p])[:k]
+                    top = top_neighbours[p][:k_neigh]
                     observed += sum(1 for t in top if int(labels[t]) == a)
                 # Expected under a size-proportional null model.
-                expected = (size_a * k * (size_b / max(1, n - 1))
-                            + size_b * k * (size_a / max(1, n - 1)))
+                expected = (size_a * k_neigh * (size_b / max(1, n - 1))
+                            + size_b * k_neigh * (size_a / max(1, n - 1)))
                 if expected <= 0:
                     continue
                 linkage = observed / expected
@@ -906,7 +918,7 @@ def detect_gaps(vectors: np.ndarray | None, labels: np.ndarray, abstracts: list[
                     continue
                 bridge_ids: list[str] = []
                 for p in sorted(set(members[a]) | set(members[b])):
-                    top = np.argsort(-sim_matrix[p])[:3]
+                    top = top_neighbours[p][:3]
                     neigh_clusters = {int(labels[t]) for t in top if t != p}
                     if a in neigh_clusters and b in neigh_clusters:
                         bridge_ids.append(ids[p])
@@ -930,12 +942,19 @@ def detect_gaps(vectors: np.ndarray | None, labels: np.ndarray, abstracts: list[
         size = len(idx)
         is_sparse = size <= sparse_size
         if not is_sparse and vectors is not None and size > 0:
+            # Mean pairwise cosine distance from a SAMPLE of rows rather than the
+            # full size x size matrix: a 6k-paper cluster is 36M float64 (288 MB)
+            # and the answer only needs a stable mean. Deterministic stride keeps
+            # the result reproducible for a given cluster.
             sub = np.asarray(vectors[idx], dtype=float)
-            sims = sub @ sub.T
-            iu = np.triu_indices(size, k=1)
-            if iu[0].size > 0:
-                mean_dist = 1.0 - float(sims[iu].mean())
-                if mean_dist >= sparse_intra:
+            sample = sub[:: max(1, size // 256)][:256]
+            if sample.shape[0] >= 2:
+                sims = sample @ sub.T
+                # Exclude self-similarity only where a sampled row is its own row.
+                row_of = np.arange(sample.shape[0]) * max(1, size // 256)
+                sims[np.arange(sample.shape[0]), row_of[: sample.shape[0]]] = np.nan
+                mean_sim = float(np.nanmean(sims))
+                if np.isfinite(mean_sim) and (1.0 - mean_sim) >= sparse_intra:
                     is_sparse = True
         if is_sparse:
             paper_ids = [ids[i] for i in idx][:12]

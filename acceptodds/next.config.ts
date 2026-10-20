@@ -1,25 +1,14 @@
 import type { NextConfig } from 'next';
 
-// The browser calls same-origin `/api/...` (see IdeaFinder). Local route handlers
-// under src/app/api already proxy most endpoints; these three exist only on the
-// FastAPI backend and must be forwarded. `beforeFiles` is required for
-// /api/papers/semantic, otherwise it would be captured by the local
-// /api/papers/[paperId] route handler.
-const backend = process.env.PAPER_API_URL ?? 'http://127.0.0.1:8000';
-
+// The browser calls same-origin `/api/...`. Most endpoints have a local route
+// handler under src/app/api that forwards to FastAPI; the slow ones (/api/gaps,
+// /api/papers/semantic) have their own handlers too, because Next's rewrite proxy
+// closes the connection ("socket hang up") on requests that run past ~30 s, while
+// a semantic search or a gap scan legitimately takes 20-40 s. No rewrites are
+// needed for those any more; they would shadow the route handlers in beforeFiles,
+// so the list is intentionally empty.
 const config: NextConfig = {
   poweredByHeader: false,
-  async rewrites() {
-    return {
-      beforeFiles: [
-        { source: '/api/venues', destination: `${backend}/api/venues` },
-        { source: '/api/papers/semantic', destination: `${backend}/api/papers/semantic` },
-        { source: '/api/gaps', destination: `${backend}/api/gaps` },
-      ],
-      afterFiles: [],
-      fallback: [],
-    };
-  },
 };
 
 export default config;

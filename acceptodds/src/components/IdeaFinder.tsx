@@ -179,6 +179,7 @@ export function IdeaFinder() {
       const data = (await response.json()) as GapsResult;
       setGaps(data.gaps ?? []);
       setTopics(data.topics ?? []);
+      if (data.note) setGapsError(data.note);
     } catch {
       setGaps([]);
       setTopics([]);
@@ -189,9 +190,10 @@ export function IdeaFinder() {
   }
 
   useEffect(() => {
-    // Gap scanning compares one fixed corpus; the whole-corpus scope would never
-    // return, so the tab is unavailable there and the panel is not requested.
-    if (year === ALL_YEARS) return;
+    // Only scan once the reader actually opens the tab. The scan takes 20-30 s on
+    // a full year, and it used to fire on mount: the page looked frozen while the
+    // user was still typing their idea, which read as "the button does nothing".
+    if (year === ALL_YEARS || activeTab !== 'gaps') return;
     let cancelled = false;
     void (async () => {
       await Promise.resolve();
@@ -201,7 +203,9 @@ export function IdeaFinder() {
     return () => {
       cancelled = true;
     };
-  }, [year]);
+    // loadGaps is re-created per render; keying on the scope is what matters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [year, activeTab]);
 
   const gapsDisabled = year === ALL_YEARS;
   const options = useMemo(
