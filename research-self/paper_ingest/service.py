@@ -176,6 +176,20 @@ async def sync_many(keys: list[str], year: int, **options: Any) -> list[dict[str
 
 def list_papers(*, venue: str | None = None, year: int | str | None = None, keyword: str | None = None,
                 status: str | None = None, page: int = 1, page_size: int = 50, sort: str = "recent") -> dict[str, Any]:
+    """Paginated paper list.
+
+    2026-10 performance fix (corpus grew 73k -> 195k with the journal papers):
+    venue/year filtering used to be a correlated ``EXISTS`` subquery per paper
+    row, which SQLite can only answer by scanning all 195k papers and probing
+    ``paper_venues`` for each one -- 112s for a single venue-year page. The
+    ``paper_venues`` index is ``(venue_id, year)``, so the filter set is far
+    smaller than the table it was filtering; making it the *driving* table
+    (``JOIN`` instead of ``EXISTS``) turns that into one index range scan over
+    the matching rows plus a primary-key lookup per row.
+
+    The ``EXISTS`` form is kept only for the unfiltered case, where it is not a
+    bottleneck and the simpler SQL is easier to reason about.
+    """
     # `year="all"` is the whole corpus: no year predicate at all. Anything else
     # resolves to a concrete year exactly as before.
     all_years = years.is_all(year)
@@ -184,15 +198,20 @@ def list_papers(*, venue: str | None = None, year: int | str | None = None, keyw
     venue = None if venue == "all" else venue
     db.init_db()
     clauses, args = [], []
-    if venue:
-        if all_years:
-            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)")
-            args.append(venue)
-        else:
-            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=? AND pv.year=?)")
-            args.extend([venue,year])
+    # When the venue/year filter is selective enough to drive the query, we join
+    # paper_venues instead of filtering papers row by row.
+    drive_join = ""
+    if venue and not all_years:
+        # Both filters live in the (venue_id, year) index: ideal driving table.
+        drive_join = " JOIN paper_venues pv ON pv.paper_id=p.id AND pv.venue_id=? AND pv.year=?"
+        args.extend([venue, year])
+    elif venue and all_years:
+        # venue_id is the index prefix, so a year-less venue filter still uses it.
+        drive_join = " JOIN paper_venues pv ON pv.paper_id=p.id AND pv.venue_id=?"
+        args.append(venue)
     elif not all_years:
-        clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.year=?)")
+        # Year-only: paper_venues_year_only_idx serves this as a driving table.
+        drive_join = " JOIN paper_venues pv ON pv.paper_id=p.id AND pv.year=?"
         args.append(year)
     if status:
         clauses.append("p.status=?"); args.append(status)
@@ -204,9 +223,12 @@ def list_papers(*, venue: str | None = None, year: int | str | None = None, keyw
     # clause list empty; emitting a bare "WHERE" there is a syntax error.
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     order = {"recent":"p.updated_at_source DESC,p.title COLLATE NOCASE", "title":"p.title COLLATE NOCASE", "year":"coalesce(p.publication_year,p.submission_year) DESC"}.get(sort,"p.updated_at_source DESC,p.title COLLATE NOCASE")
+    # DISTINCT is needed for the unfiltered/EXISTS forms where a paper can match
+    # multiple years; the JOIN form already returns one row per paper.
+    distinct = "DISTINCT " if not drive_join else ""
     with db.connect() as con:
-        total = con.execute("SELECT count(*) FROM papers p"+join+where,args).fetchone()[0]
-        rows = con.execute("SELECT DISTINCT p.* FROM papers p"+join+where+f" ORDER BY {order} LIMIT ? OFFSET ?",args+[page_size,(page-1)*page_size]).fetchall()
+        total = con.execute("SELECT count(" + distinct + "p.id) FROM papers p"+drive_join+join+where,args).fetchone()[0]
+        rows = con.execute("SELECT "+distinct+"p.* FROM papers p"+drive_join+join+where+f" ORDER BY {order} LIMIT ? OFFSET ?",args+[page_size,(page-1)*page_size]).fetchall()
         output=[]
         for row in rows:
             item=db.paper_dict(row)

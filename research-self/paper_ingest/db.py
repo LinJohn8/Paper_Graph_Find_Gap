@@ -118,6 +118,10 @@ def init_db(path: Path | None = None) -> None:
           vector_json TEXT, built_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS paper_venues_year_idx ON paper_venues(venue_id, year);
+        -- year alone: the year-only paper filter reads paper_venues by year,
+        -- which the (venue_id, year) index cannot serve (year is not its
+        -- leading column). 195k rows makes that difference the whole query.
+        CREATE INDEX IF NOT EXISTS paper_venues_year_only_idx ON paper_venues(year);
         CREATE INDEX IF NOT EXISTS papers_status_idx ON papers(status);
         """)
         # Phase 1 accidentally added UNIQUE(id), preventing the configured
