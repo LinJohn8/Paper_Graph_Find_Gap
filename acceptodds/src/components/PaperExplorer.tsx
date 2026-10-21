@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { ALL_YEARS, yearLabel, yearSelectValues, type YearInfo } from '@/lib/years';
+import { groupedVenues } from '@/lib/venues';
 
 type Item = {
   id: string;
@@ -78,13 +79,15 @@ export async function PaperExplorer({
         />
         <select className="border border-frame bg-card px-3 py-2" name="venue" defaultValue={venue}>
           <option value="all">All venues</option>
-          {venues
-            .filter((v: { id: string }, i: number) => venues.findIndex((x: { id: string }) => x.id === v.id) === i)
-            .map((v: { id: string; name: string; year: number }) => (
-              <option key={`${v.id}-${v.year}`} value={v.id}>
-                {v.name}
-              </option>
-            ))}
+          {groupedVenues(venues).map((group) => (
+            <optgroup key={group.label} label={group.label}>
+              {group.venues.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.name}
+                </option>
+              ))}
+            </optgroup>
+          ))}
         </select>
         {/* Offer the years the backend actually has, instead of a bare number box
             that defaults to a year with no data. `all` searches the whole corpus

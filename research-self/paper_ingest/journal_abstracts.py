@@ -251,7 +251,8 @@ def _backfillable(paper_url: str) -> bool:
 
 
 def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = None,
-                               sleep_s: float = 0.2, workers: int = 6) -> dict[str, Any]:
+                               sleep_s: float = 0.8, workers: int = 2,
+                               epmc_workers: int = 8, epmc_sleep_s: float = 0.05) -> dict[str, Any]:
     """Fill empty abstracts of one journal-year from publisher landing pages.
 
     Only rows whose ``paper_url`` resolves to the publisher (OpenAlex sets it
@@ -301,34 +302,43 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
     if not todo:
         return stats
 
-    # Research articles first, news items last. Europe PMC carries the
-    # research articles (measured 39/40 hits) but not Nature's news DOIs, and
-    # the publisher page rate-limits -- so the papers that can be resolved
-    # cheaply are resolved first.
-    todo.sort(key=lambda r: 0 if europepmc_eligible(doi_of(r["paper_url"])) else 1)
+    # Two channels, run separately because their rate limits differ by an
+    # order of magnitude:
+    #   * Europe PMC -- fast, generous (stable at 10 concurrent requests),
+    #     and it carries the research articles (measured 39/40 hits);
+    #   * the publisher page -- the publisher answers a burst with a
+    #     "Client Challenge" page, so this channel needs a small fan-out
+    #     (measured: 2 workers -> 35% success, 10 -> 0%).
+    # Europe PMC does not index Nature's news DOIs, so those papers can only
+    # come from the publisher page -- they are the slow lane by necessity.
+    fast = [r for r in todo if europepmc_eligible(doi_of(r["paper_url"]))]
+    slow = [r for r in todo if not europepmc_eligible(doi_of(r["paper_url"]))]
     if limit:
-        todo = todo[:limit]
+        # A limited run takes the fast lane first; only when it is empty does
+        # the slow lane get a turn.
+        fast, slow = fast[:limit], []
+        if not fast:
+            slow = slow[:limit]
 
-    def _fetch_one(row: sqlite3.Row) -> tuple[str | None, str]:
-        """Fetch one abstract: Europe PMC first, publisher page second.
-
-        Europe PMC is tried first because it is far faster and far less
-        likely to refuse. The publisher page is the fallback for what
-        Europe PMC does not index (chemistry, some IEEE titles).
-        """
+    def _fetch_epmc(row: sqlite3.Row) -> tuple[str | None, str]:
         client = httpx.Client(
-            timeout=45,
-            follow_redirects=True,
+            timeout=45, follow_redirects=True,
             headers={"User-Agent": "PaperGraph/0.2 (academic metadata; mailto:research@example.org)"},
         )
         try:
-            doi = doi_of(row["paper_url"])
-            if europepmc_eligible(doi):
-                abstract = fetch_europepmc_abstract(client, doi)
-                if abstract:
-                    return abstract, "europepmc"
-            if not _backfillable(row["paper_url"]):
-                return None, "none"
+            abstract = fetch_europepmc_abstract(client, doi_of(row["paper_url"]) or "")
+            return abstract, ("europepmc" if abstract else "none")
+        finally:
+            client.close()
+            if epmc_sleep_s:
+                time.sleep(epmc_sleep_s)
+
+    def _fetch_page(row: sqlite3.Row) -> tuple[str | None, str]:
+        client = httpx.Client(
+            timeout=45, follow_redirects=True,
+            headers={"User-Agent": "PaperGraph/0.2 (academic metadata; mailto:research@example.org)"},
+        )
+        try:
             for attempt in range(3):
                 try:
                     abstract = fetch_landing_abstract(client, row["paper_url"])
@@ -340,8 +350,6 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
             return None, "none"
         finally:
             client.close()
-            # The politeness gap lives here, inside the worker: sleeping on the
-            # consuming thread would idle the whole pipeline between results.
             if sleep_s:
                 time.sleep(sleep_s)
 
@@ -350,36 +358,45 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
         # Streaming: each result is written as it arrives, so a long year-long
         # batch shows progress and a crash loses at most the in-flight window.
         # The database work stays on this thread (one connection, one writer).
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {pool.submit(_fetch_one, row): row for row in todo}
-            for position, future in enumerate(as_completed(futures)):
-                row = futures[future]
-                try:
-                    abstract, source = future.result()
-                except Exception:  # noqa: BLE001 - one bad page must not stop the batch
-                    abstract, source = None, "none"
-                if abstract:
-                    con.execute(
-                        "UPDATE papers SET abstract=?,updated_at_source=?,last_seen_at=? WHERE id=?",
-                        (abstract, db.now(), db.now(), row["id"]),
-                    )
-                    con.execute(
-                        "INSERT OR REPLACE INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue) "
-                        "SELECT rowid, id, title, abstract, authors_json, keywords_json, ? FROM papers WHERE id=?",
-                        (venue, row["id"]),
-                    )
-                    stats["recovered"] += 1
-                    if source == "europepmc":
-                        stats["from_europepmc"] += 1
+        def _run(batch, fn, pool_size):
+            if not batch:
+                return
+            with ThreadPoolExecutor(max_workers=max(1, pool_size)) as pool:
+                futures = {pool.submit(fn, row): row for row in batch}
+                for position, future in enumerate(as_completed(futures)):
+                    row = futures[future]
+                    try:
+                        abstract, source = future.result()
+                    except Exception:  # noqa: BLE001 - one bad page must not stop the batch
+                        abstract, source = None, "none"
+                    if abstract:
+                        con.execute(
+                            "UPDATE papers SET abstract=?,updated_at_source=?,last_seen_at=? WHERE id=?",
+                            (abstract, db.now(), db.now(), row["id"]),
+                        )
+                        con.execute(
+                            "INSERT OR REPLACE INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue) "
+                            "SELECT rowid, id, title, abstract, authors_json, keywords_json, ? FROM papers WHERE id=?",
+                            (venue, row["id"]),
+                        )
+                        stats["recovered"] += 1
+                        if source == "europepmc":
+                            stats["from_europepmc"] += 1
+                        else:
+                            stats["from_landing_page"] += 1
                     else:
-                        stats["from_landing_page"] += 1
-                else:
-                    stats["no_meta"] += 1
-                if position % 50 == 49:
-                    # Commit in batches: a year-long batch would otherwise be
-                    # invisible to any other reader until it finished, and a
-                    # crash would lose the whole batch.
-                    con.commit()
+                        stats["no_meta"] += 1
+                    if position % 50 == 49:
+                        # Commit in batches: a year-long batch would otherwise be
+                        # invisible to any other reader until it finished, and a
+                        # crash would lose the whole batch.
+                        con.commit()
+
+        # The fast lane first, so the papers that carry real abstracts are in
+        # the corpus even if the slow lane is still running.
+        _run(fast, _fetch_epmc, epmc_workers)
+        con.commit()
+        _run(slow, _fetch_page, workers)
         con.commit()
     finally:
         con.close()

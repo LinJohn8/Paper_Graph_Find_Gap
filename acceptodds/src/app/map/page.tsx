@@ -10,6 +10,7 @@ import {
   yearSelectValues,
   type YearParam,
 } from '@/lib/years';
+import { groupedVenues } from '@/lib/venues';
 
 export const dynamic = 'force-dynamic';
 export const metadata: Metadata = { title: 'Paper map | Paper Graph' };
@@ -33,15 +34,15 @@ export default async function MapPage({ searchParams }: { searchParams: SearchPa
           Venue{' '}
           <select name="venue" defaultValue={kind}>
             <option value="all">All venues</option>
-            {registry?.items
-              .filter(
-                (v: { id: string }, i: number) => registry.items.findIndex((x: { id: string }) => x.id === v.id) === i,
-              )
-              .map((v: { id: string; name: string }) => (
-                <option value={v.id} key={v.id}>
-                  {v.name}
-                </option>
-              ))}
+            {groupedVenues(registry?.items).map((group) => (
+              <optgroup key={group.label} label={group.label}>
+                {group.venues.map((v) => (
+                  <option value={v.id} key={v.id}>
+                    {v.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
           </select>
         </label>
         <label>
