@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlparse, parse_qs
 import httpx
 from bs4 import BeautifulSoup
 from . import db
+from . import crawl
 
 PROVIDERS={'icml':'pmlr','acl':'acl_anthology','cvpr':'cvf','neurips':'neurips_proceedings'}
 NAMES={'icml':'ICML','acl':'ACL','cvpr':'CVPR','neurips':'NeurIPS'}
@@ -34,6 +35,10 @@ class PublicSource:
         self._local=threading.local()
         self._clients=[]
         self._clients_lock=threading.Lock()
+        # The shared retry policy (paper_ingest/crawl.py). Six attempts and a
+        # 30 s ceiling: a proceedings year is thousands of detail pages, and a
+        # single dropped keep-alive connection must not end the year.
+        self._policy=crawl.RetryPolicy(attempts=6,base_delay=1.0,max_delay=30.0,jitter=0.0)
 
     def _new_client(self):
         client=httpx.Client(timeout=35,follow_redirects=True,
@@ -91,11 +96,22 @@ class PublicSource:
         # pages, and under concurrent load a connection drops often enough that
         # 3 tries is not enough to finish the year. Observed: ACL 2023 ended
         # `failed` after 812 papers on `ConnectError: [WinError 10054]`.
-        for attempt in range(6):
+        #
+        # The decision "is this failure worth retrying?" and the wait itself
+        # come from the shared crawl policy (paper_ingest/crawl.py), so this
+        # harvester and the API collectors agree on what a 429, a 403 and a
+        # dropped socket each mean. The arithmetic is unchanged from what this
+        # method always used: min(2**attempt, 30).
+        policy=self._policy
+        for attempt in range(policy.attempts):
             try:
                 response=self.client.get(url)
-                if response.status_code==429 or response.status_code>=500:
-                    if attempt<5: time.sleep(min(2**attempt,30));continue
+                status=response.status_code
+                if status==429 or status>=500:
+                    # Retryable: the server is overloaded or rate-limiting.
+                    if attempt+1<policy.attempts:
+                        time.sleep(policy.delay_for(attempt));continue
+                    response.raise_for_status()
                 response.raise_for_status()
                 response.encoding='utf-8'
                 path.write_text(response.text,encoding='utf-8')
@@ -113,8 +129,8 @@ class PublicSource:
                 # otherwise every attempt fails on the same poisoned socket.
                 if isinstance(exc, (httpx.RemoteProtocolError, httpx.ConnectError)):
                     self._fresh_client()
-                if attempt==5:raise
-                time.sleep(min(2**attempt,30))
+                if attempt+1>=policy.attempts:raise
+                time.sleep(policy.delay_for(attempt))
         raise RuntimeError('request retries exhausted')
 
 

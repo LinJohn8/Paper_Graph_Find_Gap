@@ -247,6 +247,40 @@ daily budget when no API key is supplied; a harvest burst exhausts it and the
 API then answers `401`. Set `OPENALEX_API_KEY` (free) for a stable budget, and
 `PAPER_CONTACT_EMAIL` for the polite pool.
 
+### Running the collector
+
+Every harvesting path has one command. `python -m paper_ingest --help` lists
+them; each prints one JSON document and exits non-zero on failure.
+
+```powershell
+cd research-self
+
+# What the corpus holds, and whether each venue-year is complete.
+python -m paper_ingest coverage
+
+# Harvest journals, then fill their abstracts, then audit the result.
+python -m paper_ingest harvest --venue all --from-year 2022 --to-year 2026
+
+# Re-run one journal-year from its stored watermark (one request, not fifty).
+python -m paper_ingest journals --venue nature --year 2025 --incremental
+
+# Only the works OpenAlex indexed after a date.
+python -m paper_ingest journals --venue science --year 2025 --since 2026-01-01
+
+# The other collectors.
+python -m paper_ingest sync-api --venue icml --year 2025
+python -m paper_ingest journal-abstracts --venue cell --year 2024
+python -m paper_ingest jmlr --year 2024
+```
+
+The watermark is stored per venue-year and only advances after a *successful*
+harvest — a failed run must not claim to have caught up. A record that has not
+changed is counted and left alone, so re-running a settled year rewrites
+nothing.
+
+The expected-size manifest lives in `Data/expected_counts.yaml`; the same
+block, with the numbers documented, is in `research-self/venues.example.yaml`.
+
 ## Start on Windows
 
 Requirements: Python 3.11+, Node.js 20.9+ and PowerShell.

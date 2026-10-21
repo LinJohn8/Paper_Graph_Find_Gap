@@ -50,6 +50,8 @@ from typing import Any, Iterable
 
 import httpx
 
+from . import crawl
+
 __all__ = [
     "API_URL",
     "DEFAULT_DELAY",
@@ -391,6 +393,16 @@ class ArxivProvider:
         #: this client (often because several processes share one public IP), which
         #: is a different situation from "no papers match the venue".
         self.last_status_code: int | None = None
+        # The shared retry policy (paper_ingest/crawl.py). The floor is the
+        # polite delay between requests, the ceiling is the same 120 s this
+        # provider has always used, and there is no jitter: arXiv asks for a
+        # fixed interval, and randomising it would break that politeness.
+        self._policy = crawl.RetryPolicy(
+            attempts=self.max_retries,
+            base_delay=max(self.delay, 1.0),
+            max_delay=120.0,
+            jitter=0.0,
+        )
 
     # -- lifecycle ---------------------------------------------------------
     def close(self) -> None:
@@ -454,8 +466,19 @@ class ArxivProvider:
         raise RuntimeError("arXiv request failed after retries")
 
     def _sleep_backoff(self, attempt: int, retry_after: str | None) -> None:
-        """Exponential backoff, honouring `Retry-After` when the server sends one."""
-        pause = max(self.delay, 1.0) * (2 ** attempt)
+        """Exponential backoff, honouring `Retry-After` when the server sends one.
+
+        The exponential arithmetic comes from the shared crawl policy
+        (:mod:`paper_ingest.crawl`), so every collector in this package
+        backs off the same way. arXiv keeps two rules of its own on top:
+
+        * the pause is never shorter than the polite delay between requests
+          (arXiv asks for three seconds between calls);
+        * a server ``Retry-After`` only ever *raises* the pause, never lowers
+          it -- the server may know a longer one is needed, but it cannot
+          shorten the interval arXiv asked for.
+        """
+        pause = self._policy.delay_for(attempt)
         if retry_after:
             try:
                 pause = max(pause, float(retry_after))
