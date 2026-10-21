@@ -115,6 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     journals.add_argument("--limit", type=int, default=None)
     journals.add_argument("--no-backfill", action="store_true",
                           help="skip the abstract backfill pass")
+    journals.add_argument("--since", default=None,
+                          help="only fetch works OpenAlex indexed after this date (YYYY-MM-DD)")
+    journals.add_argument("--incremental", action="store_true",
+                          help="resume from this venue-year's stored watermark")
     journals.add_argument("--mailto", default=None)
     journals.add_argument("--api-key", default=None)
 
@@ -162,6 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--to-year", type=int, default=2026)
     plan.add_argument("--limit", type=int, default=None)
     plan.add_argument("--no-backfill", action="store_true")
+    plan.add_argument("--since", default=None,
+                      help="only fetch works indexed after this date (YYYY-MM-DD)")
+    plan.add_argument("--incremental", action="store_true",
+                      help="resume from the stored watermark of each venue-year")
     plan.add_argument("--skip-journals", action="store_true",
                       help="only backfill abstracts (the corpus is already there)")
     plan.add_argument("--workers", type=int, default=2)
@@ -273,6 +281,8 @@ def _harvest_one_journal(key: str, year: int, args: argparse.Namespace) -> dict[
         backfill=not getattr(args, "no_backfill", False),
         mailto=getattr(args, "mailto", None),
         api_key=getattr(args, "api_key", None),
+        since=getattr(args, "since", None),
+        incremental=bool(getattr(args, "incremental", False)),
     )
     result["seconds"] = round(time.time() - started, 1)
     result["source_id"] = source_id

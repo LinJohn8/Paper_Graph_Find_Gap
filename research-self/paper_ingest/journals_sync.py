@@ -53,6 +53,29 @@ def normalize_title_key(title: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "", title.lower())
 
 
+def _read_watermark(con, venue_key: str, year: int) -> str | None:
+    """The date this venue-year was last harvested, as ``YYYY-MM-DD``.
+
+    The watermark is what makes an incremental run cheap: OpenAlex can be
+    asked only for the works it indexed after that date, so a re-run over a
+    settled year fetches a handful of records instead of thousands.
+    """
+    row = con.execute(
+        "SELECT checkpoint FROM sync_state WHERE venue=? AND year=?",
+        (venue_key, year)).fetchone()
+    if row is None or not row["checkpoint"]:
+        return None
+    return str(row["checkpoint"])[:10] or None
+
+
+def _write_watermark(con, venue_key: str, year: int, when: str) -> None:
+    """Record the harvest date so the next run can start from it."""
+    con.execute(
+        "INSERT OR REPLACE INTO sync_state(venue,year,cursor,checkpoint,updated_at) "
+        "VALUES(?,?,?,?,?)",
+        (venue_key, year, None, when[:10], db.now()))
+
+
 def import_journal_year(
     venue_key: str,
     year: int,
@@ -63,6 +86,8 @@ def import_journal_year(
     api_key: str | None = None,
     workers: int = 2,
     epmc_workers: int = 8,
+    since: str | None = None,
+    incremental: bool = False,
 ) -> dict[str, Any]:
     """Harvest one journal-year and write it into the corpus.
 
@@ -70,6 +95,10 @@ def import_journal_year(
     long it took. A failure is recorded on the ``sync_jobs`` row and reported
     in the result (``status: "failed"``) rather than raised -- a harvest that
     cannot reach one journal must not abort a plan that covers fifteen.
+
+    ``incremental=True`` reuses the stored watermark as the starting point and
+    records a new one, so a settled year costs one request instead of fifty.
+    ``since`` overrides the watermark explicitly.
     """
     if venue_key not in JOURNAL_SOURCES:
         raise ValueError(
@@ -79,8 +108,8 @@ def import_journal_year(
     started = time.time()
     counts: dict[str, Any] = {
         "venue": venue_key, "year": year, "status": "success",
-        "fetched": 0, "inserted": 0, "updated": 0, "no_abstract": 0,
-        "recovered": 0, "error": None,
+        "fetched": 0, "inserted": 0, "updated": 0, "unchanged": 0, "no_abstract": 0,
+        "recovered": 0, "error": None, "since": None,
     }
     provider = JournalProvider(venue_key, mailto=mailto)
     if api_key:
@@ -112,9 +141,22 @@ def import_journal_year(
                 key = normalize_title_key(row["title"])
                 if len(key) >= 20 and key not in existing:
                     existing[key] = row["id"]
+            # The records already stored, with the abstract they carry, so a
+            # record that has not changed is not written again.
+            stored_abstract: dict[str, str | None] = {}
+            for row in con.execute(
+                "SELECT p.id, p.abstract FROM papers p JOIN paper_venues pv ON pv.paper_id=p.id "
+                "WHERE pv.venue_id=? AND pv.year=?", (venue_key, year),
+            ):
+                stored_abstract[row["id"]] = row["abstract"]
+
+            watermark = since
+            if incremental and watermark is None:
+                watermark = _read_watermark(con, venue_key, year)
+            counts["since"] = watermark
             con.commit()
 
-            papers = provider.list_year(year, limit=limit)
+            papers = provider.list_year(year, limit=limit, since=watermark)
             counts["fetched"] = len(papers)
             for position, paper in enumerate(papers):
                 if not paper.get("abstract"):
@@ -123,6 +165,13 @@ def import_journal_year(
                 reuse = existing.get(title_key) if len(title_key) >= 20 else None
                 if reuse:
                     paper["id"] = reuse
+                if paper["id"] in stored_abstract:
+                    # Already stored. An unchanged record is skipped outright:
+                    # rewriting it would touch every FTS row and every
+                    # ``last_seen_at`` for nothing.
+                    if stored_abstract[paper["id"]] == (paper.get("abstract") or None):
+                        counts["unchanged"] += 1
+                        continue
                 before = con.execute(
                     "SELECT id FROM papers WHERE id=?", (paper["id"],)).fetchone()
                 db.upsert_paper(con, paper, venue_key, year, relation_type="publication")
@@ -148,11 +197,15 @@ def import_journal_year(
 
     counts["seconds"] = round(time.time() - started, 1)
     with db.connect() as con:
+        if counts["status"] == "success":
+            # The watermark advances only after a successful run: a failed
+            # harvest must not claim to have caught up.
+            _write_watermark(con, venue_key, year, db.now())
         con.execute(
             "UPDATE sync_jobs SET status=?,finished_at=?,fetched_count=?,inserted_count=?,"
             "updated_count=?,skipped_count=?,error_count=?,error_message=? WHERE id=?",
             (counts["status"], db.now(), counts["fetched"], counts["inserted"],
-             counts["updated"], 0, 0 if counts["status"] == "success" else 1,
+             counts["updated"], counts["unchanged"], 0 if counts["status"] == "success" else 1,
              counts["error"], job_id),
         )
         con.commit()

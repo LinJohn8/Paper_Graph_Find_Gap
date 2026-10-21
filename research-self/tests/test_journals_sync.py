@@ -85,7 +85,7 @@ class TestImportJournalYear:
             def __init__(self, venue_key, *, mailto=None):
                 self.venue_key = venue_key
 
-            def list_year(self, year, *, limit=None):
+            def list_year(self, year, *, limit=None, since=None):
                 return papers
 
             def close(self):
@@ -101,7 +101,7 @@ class TestImportJournalYear:
 
         result = journals_sync.import_journal_year("nature", 2024, backfill=True)
 
-        assert result["status"] == "success"
+        assert result["status"] == "success", result.get("error")
         assert result["fetched"] == 2
         assert result["inserted"] == 2
         with db.connect() as con:
@@ -120,7 +120,7 @@ class TestImportJournalYear:
             def __init__(self, venue_key, *, mailto=None):
                 pass
 
-            def list_year(self, year, *, limit=None):
+            def list_year(self, year, *, limit=None, since=None):
                 return papers
 
             def close(self):
@@ -137,13 +137,50 @@ class TestImportJournalYear:
         journals_sync.import_journal_year("nature", 2024)
         second = journals_sync.import_journal_year("nature", 2024)
 
+        # The record did not change, so nothing is written again -- that is the
+        # point of the unchanged check.
         assert second["inserted"] == 0
-        assert second["updated"] == 1
+        assert second["updated"] == 0
+        assert second["unchanged"] == 1
         with db.connect() as con:
             assert con.execute("SELECT count(*) FROM papers").fetchone()[0] == 1
             assert con.execute(
                 "SELECT count(*) FROM paper_venues WHERE venue_id='nature'"
             ).fetchone()[0] == 1
+
+    def test_a_changed_record_is_rewritten(self, memory_db, monkeypatch):
+        from paper_ingest import provider_journals
+
+        papers = [_paper("openalex:W1", "A First Paper", abstract="First version.")]
+
+        class FakeProvider:
+            def __init__(self, venue_key, *, mailto=None):
+                pass
+
+            def list_year(self, year, *, limit=None, since=None):
+                return papers
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(journals_sync, "JournalProvider", FakeProvider)
+        monkeypatch.setattr(provider_journals, "JOURNAL_SOURCES",
+                            {"nature": ("S123", "Nature")})
+        monkeypatch.setattr(journals_sync, "JOURNAL_SOURCES",
+                            {"nature": ("S123", "Nature")})
+        monkeypatch.setattr(journals_sync, "backfill_journal_abstracts",
+                            lambda *a, **k: {"recovered": 0})
+
+        journals_sync.import_journal_year("nature", 2024, backfill=False)
+        papers[0] = _paper("openalex:W1", "A First Paper", abstract="A better abstract.")
+        second = journals_sync.import_journal_year("nature", 2024, backfill=False)
+
+        assert second["updated"] == 1
+        assert second["unchanged"] == 0
+        with db.connect() as con:
+            assert con.execute(
+                "SELECT abstract FROM papers WHERE id='openalex:W1'").fetchone()[0] \
+                == "A better abstract."
 
     def test_a_failure_is_recorded_not_raised(self, memory_db, monkeypatch):
         from paper_ingest import provider_journals
@@ -152,7 +189,7 @@ class TestImportJournalYear:
             def __init__(self, venue_key, *, mailto=None):
                 pass
 
-            def list_year(self, year, *, limit=None):
+            def list_year(self, year, *, limit=None, since=None):
                 raise RuntimeError("openalex refused")
 
             def close(self):
@@ -174,3 +211,96 @@ class TestImportJournalYear:
                 "ORDER BY id DESC LIMIT 1").fetchone()
             assert row["status"] == "failed"
             assert "openalex refused" in row["error_message"]
+
+
+class TestIncremental:
+    """The watermark behaviour: a re-run must be cheap, and honest."""
+
+    def _provider(self, monkeypatch, papers, seen=None):
+        from paper_ingest import provider_journals
+
+        class FakeProvider:
+            def __init__(self, venue_key, *, mailto=None):
+                pass
+
+            def list_year(self, year, *, limit=None, since=None):
+                if seen is not None:
+                    seen.append(since)
+                return papers
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(journals_sync, "JournalProvider", FakeProvider)
+        monkeypatch.setattr(provider_journals, "JOURNAL_SOURCES",
+                            {"nature": ("S123", "Nature")})
+        monkeypatch.setattr(journals_sync, "JOURNAL_SOURCES",
+                            {"nature": ("S123", "Nature")})
+        monkeypatch.setattr(journals_sync, "backfill_journal_abstracts",
+                            lambda *a, **k: {"recovered": 0})
+
+    def test_the_watermark_is_written_after_a_successful_run(self, memory_db, monkeypatch):
+        self._provider(monkeypatch, [_paper("openalex:W1", "A First Paper")])
+        journals_sync.import_journal_year("nature", 2024, backfill=False)
+        with db.connect() as con:
+            row = con.execute(
+                "SELECT checkpoint FROM sync_state WHERE venue='nature' AND year=2024"
+            ).fetchone()
+            assert row is not None
+            assert row["checkpoint"]
+
+    def test_a_failed_run_does_not_advance_the_watermark(self, memory_db, monkeypatch):
+        from paper_ingest import provider_journals
+
+        class BrokenProvider:
+            def __init__(self, venue_key, *, mailto=None):
+                pass
+
+            def list_year(self, year, *, limit=None, since=None):
+                raise RuntimeError("nope")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(journals_sync, "JournalProvider", BrokenProvider)
+        monkeypatch.setattr(provider_journals, "JOURNAL_SOURCES",
+                            {"nature": ("S123", "Nature")})
+        monkeypatch.setattr(journals_sync, "JOURNAL_SOURCES",
+                            {"nature": ("S123", "Nature")})
+
+        journals_sync.import_journal_year("nature", 2024, backfill=False)
+        with db.connect() as con:
+            row = con.execute(
+                "SELECT checkpoint FROM sync_state WHERE venue='nature' AND year=2024"
+            ).fetchone()
+            # A failed harvest must not claim to have caught up.
+            assert row is None or not row["checkpoint"]
+
+    def test_an_incremental_run_resumes_from_the_watermark(self, memory_db, monkeypatch):
+        seen: list[str | None] = []
+        self._provider(monkeypatch, [_paper("openalex:W1", "A First Paper")], seen)
+        journals_sync.import_journal_year("nature", 2024, backfill=False)
+        assert seen[0] is None, "the first run has no watermark to resume from"
+
+        journals_sync.import_journal_year("nature", 2024, backfill=False, incremental=True)
+        assert seen[1] is not None, "the second run must resume from the watermark"
+        # The watermark is a date, which is what OpenAlex's filter accepts.
+        assert len(seen[1]) == 10 and seen[1][4] == "-"
+
+    def test_an_explicit_since_overrides_the_watermark(self, memory_db, monkeypatch):
+        seen: list[str | None] = []
+        self._provider(monkeypatch, [_paper("openalex:W1", "A First Paper")], seen)
+        journals_sync.import_journal_year("nature", 2024, backfill=False,
+                                          since="2026-01-02", incremental=True)
+        assert seen[0] == "2026-01-02"
+
+    def test_an_unchanged_record_is_not_written_again(self, memory_db, monkeypatch):
+        papers = [_paper("openalex:W1", "A First Paper", abstract="The abstract text.")]
+        self._provider(monkeypatch, papers)
+        journals_sync.import_journal_year("nature", 2024, backfill=False)
+        second = journals_sync.import_journal_year("nature", 2024, backfill=False)
+        assert second["unchanged"] == 1
+        assert second["inserted"] == 0
+        assert second["updated"] == 0
+        with db.connect() as con:
+            assert con.execute("SELECT count(*) FROM papers").fetchone()[0] == 1

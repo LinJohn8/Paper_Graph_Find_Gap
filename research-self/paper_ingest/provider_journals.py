@@ -138,7 +138,8 @@ class JournalProvider(OpenAlexProvider):
             raise ValueError(f"this provider serves {self.venue_key!r}, not {venue!r}")
         return self.list_year(year, limit=limit)
 
-    def list_year(self, year: int, *, limit: int | None = None) -> list[dict[str, Any]]:
+    def list_year(self, year: int, *, limit: int | None = None,
+                  since: str | None = None) -> list[dict[str, Any]]:
         """All articles of this journal for ``year`` (paginated, offset-based).
 
         Offset paging (``page=N``), never cursor paging: OpenAlex gates cursor
@@ -148,11 +149,23 @@ class JournalProvider(OpenAlexProvider):
         the same wall and documented the same fix; ``page=N`` is ungated.
         Journal years are at most a few thousand articles, far below the
         ~10k deep-paging ceiling, so offset paging reaches everything.
+
+        ``since`` narrows the query to the works OpenAlex indexed after that
+        date (``from_created_date``). That is the *indexing* date, not the
+        publication date, which is exactly what an incremental sync needs: a
+        journal year does not change when it is published, it changes as
+        OpenAlex catches up, and only the newly indexed records are worth
+        fetching again. The date must be a plain ``YYYY-MM-DD`` (OpenAlex
+        rejects a full timestamp here), so a finer watermark is truncated to
+        its date.
         """
         works: list[dict[str, Any]] = []
         per_page = OPENALEX_MAX_PER_PAGE if limit is None else min(int(limit), OPENALEX_MAX_PER_PAGE)
         remaining = limit
         page = 1
+        # OpenAlex rejects a full timestamp in from_created_date, so the
+        # watermark is truncated to its date part.
+        since_date = (since or "").strip()[:10] or None
         # Offset paging is capped at 50 pages (10,000 works) without an API key
         # — measured 2026-10-21: page 50 answers 200, page 51 answers 400. A
         # journal-year larger than that (Nature Communications 2024+) is
@@ -161,12 +174,15 @@ class JournalProvider(OpenAlexProvider):
         # visible rather than silent. An OPENALEX_API_KEY lifts the cap (cursor
         # paging becomes available).
         while page <= 50:
+            filters = [
+                f"locations.source.id:{self.source_id}",
+                f"publication_year:{year}",
+                "type:article",
+            ]
+            if since_date:
+                filters.append(f"from_created_date:{since_date}")
             params = {
-                "filter": (
-                    f"locations.source.id:{self.source_id},"
-                    f"publication_year:{year},"
-                    "type:article"
-                ),
+                "filter": ",".join(filters),
                 "select": OPENALEX_SELECT,
                 "per-page": per_page,
                 "mailto": self.http.mailto,
