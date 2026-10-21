@@ -70,13 +70,57 @@ def fetch_landing_abstract(client: httpx.Client, paper_url: str) -> str | None:
         return None
 
 
+#: Publishers whose landing pages ship og:description (measured 2026-10-21:
+#: Springer/Nature 12/12 recovered). Elsevier (Cell, The Lancet) serves a
+#: meta-refresh interstitial via doi.org and 403s direct article URLs, so the
+#: og:description channel cannot reach it — those journals keep their OpenAlex
+#: metadata as-is rather than burning a timeout per paper.
+BACKFILLABLE_HOSTS = (
+    "nature.com",
+    "link.springer.com",
+    "springer.com",
+    "biomedcentral.com",
+    "pnas.org",
+)
+
+#: DOI prefixes that resolve into the backfillable publishers. OpenAlex stores
+#: ``paper_url`` as the bare doi.org link, so the host check alone never fires;
+#: the DOI prefix is the reliable signal (10.1038 = Springer Nature, 10.1007 =
+#: Springer, 10.1109 = IEEE, 10.1126 = AAAS, 10.1073 = PNAS).
+BACKFILLABLE_DOI_PREFIXES = (
+    "10.1038/",   # Springer Nature
+    "10.1007/",   # Springer
+    "10.1186/",   # BMC / Springer Nature
+    "10.1109/",   # IEEE (tpami/ijcv)
+    "10.1126/",   # AAAS (science)
+    "10.1073/",   # PNAS
+)
+
+
+def _backfillable(paper_url: str) -> bool:
+    """Whether the og:description channel can plausibly reach this paper.
+
+    doi.org URLs are judged by their DOI prefix (see
+    :data:`BACKFILLABLE_DOI_PREFIXES`); direct publisher hosts by domain.
+    """
+    host = paper_url.split("/")[2] if paper_url.count("/") >= 2 else ""
+    if any(host == h or host.endswith("." + h) for h in BACKFILLABLE_HOSTS):
+        return True
+    for prefix in BACKFILLABLE_DOI_PREFIXES:
+        if prefix in paper_url:
+            return True
+    return False
+
+
 def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = None,
                                sleep_s: float = 1.0) -> dict[str, Any]:
     """Fill empty abstracts of one journal-year from publisher landing pages.
 
     Only rows whose ``paper_url`` resolves to the publisher (OpenAlex sets it
     from the landing page) are touched; rows with an existing abstract are
-    skipped, so the pass is resumable and idempotent.
+    skipped, so the pass is resumable and idempotent. Non-backfillable hosts
+    (Elsevier's interstitial wall) are counted as ``skipped_host`` instead of
+    being attempted — each would otherwise cost a request that cannot succeed.
     """
     db.init_db()
     with db.connect() as con:
@@ -91,7 +135,7 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
         ).fetchall()
 
     stats: dict[str, Any] = {"venue": venue, "year": year, "candidates": len(rows),
-                             "recovered": 0, "failed": 0, "no_meta": 0}
+                             "recovered": 0, "failed": 0, "no_meta": 0, "skipped_host": 0}
     if not rows:
         return stats
 
@@ -103,6 +147,9 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
     try:
         con = db.connect()
         for position, row in enumerate(rows):
+            if not _backfillable(row["paper_url"]):
+                stats["skipped_host"] += 1
+                continue
             abstract = fetch_landing_abstract(client, row["paper_url"])
             if abstract:
                 con.execute(
@@ -115,11 +162,7 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
                     (venue, row["id"]),
                 )
                 stats["recovered"] += 1
-            elif abstract is None:
-                # Distinguish "meta missing" (no og:description) from a fetch
-                # failure only loosely here; both count toward 'no_meta' unless
-                # the request itself raised, which returns None too. Good enough
-                # for a report row.
+            else:
                 stats["no_meta"] += 1
             if position % 50 == 49:
                 con.commit()

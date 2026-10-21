@@ -90,6 +90,13 @@ JOURNAL_SOURCES: dict[str, tuple[str, str]] = {
     "tpami": ("S199944782", "IEEE Transactions on Pattern Analysis and Machine Intelligence"),
     "ijcv": ("S25538012", "International Journal of Computer Vision"),
     # JMLR (the ML journal the conference corpus always lacked)
+    # KNOWN GAP: OpenAlex attaches almost no works to this source for recent
+    # years (measured 2026-10-21: per-year count 0 for 2022-2024/2026, 1 for
+    # 2025, while the source's total works_count is 1269 — all older papers).
+    # Recent JMLR papers are published at jmlr.org, which OpenAlex does not
+    # index under this source; a future harvester could scrape jmlr.org/papers/
+    # the way tmlr.py scrapes jmlr.org/tmlr/papers/. Until then this key
+    # harvests 0 rows, which the runner records as a truthful empty year.
     "jmlr": ("S118988714", "Journal of Machine Learning Research"),
     # APS
     "prl": ("S24807848", "Physical Review Letters"),
@@ -131,12 +138,28 @@ class JournalProvider(OpenAlexProvider):
         return self.list_year(year, limit=limit)
 
     def list_year(self, year: int, *, limit: int | None = None) -> list[dict[str, Any]]:
-        """All articles of this journal for ``year`` (paginated, cursor-based)."""
+        """All articles of this journal for ``year`` (paginated, offset-based).
+
+        Offset paging (``page=N``), never cursor paging: OpenAlex gates cursor
+        requests behind an API key (HTTP 401 even on page 1 — re-measured
+        2026-10-21: a plain request answers 200 while the same request plus
+        ``cursor=*`` answers 401 without a key). The conference harvester hit
+        the same wall and documented the same fix; ``page=N`` is ungated.
+        Journal years are at most a few thousand articles, far below the
+        ~10k deep-paging ceiling, so offset paging reaches everything.
+        """
         works: list[dict[str, Any]] = []
-        cursor: str | None = "*"
         per_page = OPENALEX_MAX_PER_PAGE if limit is None else min(int(limit), OPENALEX_MAX_PER_PAGE)
         remaining = limit
-        while cursor:
+        page = 1
+        # Offset paging is capped at 50 pages (10,000 works) without an API key
+        # — measured 2026-10-21: page 50 answers 200, page 51 answers 400. A
+        # journal-year larger than that (Nature Communications 2024+) is
+        # imported as its first 10,000 articles; the year is still recorded and
+        # the runner reports the fetched count, so the partial coverage is
+        # visible rather than silent. An OPENALEX_API_KEY lifts the cap (cursor
+        # paging becomes available).
+        while page <= 50:
             params = {
                 "filter": (
                     f"locations.source.id:{self.source_id},"
@@ -146,11 +169,24 @@ class JournalProvider(OpenAlexProvider):
                 "select": OPENALEX_SELECT,
                 "per-page": per_page,
                 "mailto": self.http.mailto,
-                "cursor": cursor,
+                "page": page,
             }
-            payload = self.http.get_json(f"{OPENALEX_API}/works", params)
+            try:
+                payload = self.http.get_json(f"{OPENALEX_API}/works", params)
+            except PoliteHttpError as exc:
+                if getattr(exc, "status_code", None) == 400 and page > 1:
+                    # The unkeyed deep-paging ceiling: stop cleanly instead of
+                    # failing the year, which would discard everything fetched.
+                    LOGGER.info(
+                        "journal %s %s: offset page %d rejected (unkeyed ceiling); "
+                        "importing the first %d articles as partial coverage",
+                        self.venue_key, year, page, len(works),
+                    )
+                    break
+                raise
             batch = payload.get("results", [])
-            meta = payload.get("meta", {})
+            if not batch:
+                break  # documented end of results
             for work in batch:
                 try:
                     normalized = self.normalize(work, self.venue_key, year)
@@ -162,7 +198,9 @@ class JournalProvider(OpenAlexProvider):
                     remaining -= 1
                     if remaining <= 0:
                         return works
-            cursor = meta.get("next_cursor")
+            if len(batch) < per_page:
+                break  # short page: reached the end
+            page += 1
         return works
 
 
