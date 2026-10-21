@@ -22,3 +22,8 @@ research-self/**/__pycache__/
 # DATA_COVERAGE_REPAIR_REPORT.md and docs/).
 research-self/_*
 .pytest_cache/
+# Scratch files used to carry a commit message into `git commit -F`. They are
+# written at the repository root, where `git add -A` would otherwise sweep
+# them into the commit they were only meant to describe.
+msg*.txt
+_c*.txt
