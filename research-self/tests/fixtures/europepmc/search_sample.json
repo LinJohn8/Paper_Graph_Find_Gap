@@ -1,0 +1,35 @@
+{
+  "hitCount": 1,
+  "request": {
+    "query": "DOI:\"10.1038/s41586-023-06004-9\"",
+    "resultType": "core",
+    "format": "json",
+    "pageSize": 1
+  },
+  "resultList": {
+    "result": [
+      {
+        "id": "MED/37891234",
+        "source": "MED",
+        "pmid": "37891234",
+        "pmcid": "PMC10628517",
+        "doi": "10.1038/s41586-023-06004-9",
+        "title": "A structural atlas of protein complexes in the human cell",
+        "authorString": "Doe J, Roe R, Poe S",
+        "journalInfo": {
+          "issue": "8063",
+          "volume": "620",
+          "yearOfPublication": 2023,
+          "journal": {
+            "title": "Nature",
+            "issn": "0028-0836",
+            "isoabbreviation": "Nature"
+          }
+        },
+        "pubYear": "2023",
+        "pageInfo": "601-609",
+        "abstractText": "Mapping the molecular architecture of the human cell requires a systematic description of how protein assemblies fit together at scale. We present a systematic atlas of protein complexes, combining cryo-electron microscopy with integrative structural modelling to resolve more than one thousand assemblies. The atlas reveals recurrent architectural motifs, maps the interaction interfaces that stabilise each assembly, and provides a structural context for the large fraction of human proteins whose partners were previously unknown. The resource is designed to be reused, and the accompanying software supports query, visualisation and download of the underlying models."
+      }
+    ]
+  }
+}

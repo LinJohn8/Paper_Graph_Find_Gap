@@ -1,0 +1,213 @@
+{
+  "meta": {
+    "count": 2,
+    "db_response_time_ms": 21,
+    "page": 1,
+    "per_page": 200,
+    "next_cursor": null
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W4415795831",
+      "doi": "https://doi.org/10.52202/079017-3429",
+      "title": "Generalization Bounds for Spectral Normalization in Large Language Models",
+      "abstract_inverted_index": {
+        "We": [0],
+        "study": [1, 23],
+        "the": [2, 8, 30],
+        "effect": [3],
+        "of": [4, 10, 37],
+        "spectral": [5],
+        "normalization": [6],
+        "on": [7, 39],
+        "generalization": [9],
+        "large": [11],
+        "language": [12],
+        "models.": [13],
+        "Our": [14],
+        "analysis": [15],
+        "combines": [16],
+        "a": [17, 35],
+        "data-dependent": [18],
+        "bound": [19, 31],
+        "with": [20],
+        "an": [21],
+        "empirical": [22],
+        "across": [24],
+        "three": [25],
+        "model": [26],
+        "families,": [27],
+        "showing": [28],
+        "that": [29],
+        "is": [32],
+        "tight": [33],
+        "within": [34],
+        "factor": [36],
+        "two": [38],
+        "all": [40],
+        "benchmarks.": [41]
+      },
+      "publication_year": 2023,
+      "type": "article",
+      "authorships": [
+        {
+          "author_position": "first",
+          "author": {
+            "id": "https://openalex.org/A5023888391",
+            "display_name": "Priya Raman",
+            "orcid": "https://orcid.org/0000-0002-1825-0097"
+          },
+          "raw_author_name": "Priya Raman",
+          "is_corresponding": true
+        },
+        {
+          "author_position": "last",
+          "author": {
+            "id": "https://openalex.org/A5062113488",
+            "display_name": "Tomas Weiss",
+            "orcid": null
+          },
+          "raw_author_name": "Tomas Weiss",
+          "is_corresponding": false
+        }
+      ],
+      "primary_location": {
+        "landing_page_url": "https://proceedings.neurips.cc/paper_files/paper/2023/hash/1f0c3a-Paper-Conference.html",
+        "pdf_url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/1f0c3a-Paper-Conference.pdf",
+        "source": {
+          "id": "https://openalex.org/S4363606243",
+          "display_name": "Advances in Neural Information Processing Systems",
+          "type": "conference"
+        },
+        "is_oa": true,
+        "version": "publishedVersion"
+      },
+      "referenced_works": [
+        "https://openalex.org/W2963402821",
+        "https://openalex.org/W2963546889"
+      ],
+      "cited_by_count": 17,
+      "keywords": [
+        {
+          "id": "https://openalex.org/keywords/generalization-bounds",
+          "display_name": "Generalization bounds",
+          "score": 0.62
+        },
+        {
+          "id": "https://openalex.org/keywords/spectral-normalization",
+          "display_name": "Spectral normalization",
+          "score": 0.41
+        }
+      ],
+      "primary_topic": {
+        "id": "https://openalex.org/T10803",
+        "display_name": "Machine learning generalization",
+        "subfield": {
+          "id": "https://openalex.org/subfields/10803",
+          "display_name": "Machine Learning"
+        },
+        "field": {
+          "id": "https://openalex.org/fields/10181",
+          "display_name": "Computer Science"
+        },
+        "score": 0.83
+      },
+      "created_date": "2023-12-11T09:12:44.301000",
+      "updated_date": "2024-05-02T11:41:07.882000",
+      "open_access": {
+        "is_oa": true,
+        "oa_status": "gold",
+        "oa_url": "https://proceedings.neurips.cc/paper_files/paper/2023/file/1f0c3a-Paper-Conference.pdf",
+        "any_repository_has_fulltext": false,
+        "is_oa_accepted": true,
+        "is_preprint": false
+      }
+    },
+    {
+      "id": "https://openalex.org/W4387120033",
+      "doi": "https://doi.org/10.5555/3618408.3620371",
+      "title": "Adaptive Sampling for Stochastic Optimization",
+      "abstract_inverted_index": {
+        "We": [0],
+        "derive": [1],
+        "an": [2],
+        "adaptive": [3],
+        "sampling": [4],
+        "rule": [5],
+        "for": [6],
+        "stochastic": [7],
+        "optimization": [8],
+        "that": [9],
+        "reduces": [10],
+        "the": [11],
+        "number": [12],
+        "of": [13],
+        "required": [14],
+        "function": [15],
+        "evaluations": [16],
+        "by": [17],
+        "half": [18],
+        "on": [19],
+        "three": [20],
+        "benchmarks.": [21]
+      },
+      "publication_year": 2023,
+      "type": "article",
+      "authorships": [
+        {
+          "author_position": "first",
+          "author": {
+            "id": "https://openalex.org/A5100331122",
+            "display_name": "Mei Lin",
+            "orcid": null
+          },
+          "raw_author_name": "Mei Lin",
+          "is_corresponding": true
+        }
+      ],
+      "primary_location": {
+        "landing_page_url": "https://proceedings.mlr.press/v202/lin23b.html",
+        "pdf_url": "https://proceedings.mlr.press/v202/lin23b/lin23b.pdf",
+        "source": {
+          "id": "https://openalex.org/S4306419644",
+          "display_name": "Proceedings of the 40th International Conference on Machine Learning",
+          "type": "conference"
+        },
+        "is_oa": true,
+        "version": "publishedVersion"
+      },
+      "referenced_works": [],
+      "cited_by_count": 3,
+      "keywords": [
+        {
+          "id": "https://openalex.org/keywords/stochastic-optimization",
+          "display_name": "Stochastic optimization",
+          "score": 0.55
+        }
+      ],
+      "primary_topic": {
+        "id": "https://openalex.org/T11021",
+        "display_name": "Optimization algorithms",
+        "subfield": {
+          "id": "https://openalex.org/subfields/11021",
+          "display_name": "Optimization and Machine Learning"
+        },
+        "field": {
+          "id": "https://openalex.org/fields/10181",
+          "display_name": "Computer Science"
+        },
+        "score": 0.71
+      },
+      "created_date": "2023-07-04T18:02:11.000000",
+      "updated_date": "2024-01-19T08:31:55.120000",
+      "open_access": {
+        "is_oa": true,
+        "oa_status": "gold",
+        "oa_url": "https://proceedings.mlr.press/v202/lin23b/lin23b.pdf",
+        "any_repository_has_fulltext": true,
+        "is_oa_accepted": true,
+        "is_preprint": false
+      }
+    }
+  ]
+}

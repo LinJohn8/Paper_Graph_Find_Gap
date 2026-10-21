@@ -1,0 +1,42 @@
+{
+  "openalex/works_sample.json": {
+    "url": "https://api.openalex.org/works",
+    "method": "GET",
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    }
+  },
+  "europepmc/search_sample.json": {
+    "url": "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+    "method": "GET",
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8"
+    }
+  },
+  "jmlr/volume24.html": {
+    "url": "https://jmlr.org/papers/v24/",
+    "method": "GET",
+    "status": 200,
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    }
+  },
+  "jmlr/paper_18-080.html": {
+    "url": "https://jmlr.org/papers/v24/18-080.html",
+    "method": "GET",
+    "status": 200,
+    "headers": {
+      "content-type": "text/html; charset=utf-8"
+    }
+  },
+  "arxiv/feed_sample.xml": {
+    "url": "http://export.arxiv.org/api/query",
+    "method": "GET",
+    "status": 200,
+    "headers": {
+      "content-type": "application/atom+xml; charset=utf-8"
+    }
+  }
+}

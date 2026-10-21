@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <link href="http://arxiv.org/api/query?search_query=all%3Adiffusion&amp;start=0&amp;max_results=2" rel="self" type="application/atom+xml"/>
+  <title type="html">ArXiv Query: search_query=all:diffusion&amp;start=0&amp;max_results=2</title>
+  <id>http://arxiv.org/api/replay-sample-0001</id>
+  <updated>2024-03-01T00:00:00-05:00</updated>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <opensearch:itemsPerPage>2</opensearch:itemsPerPage>
+  <entry>
+    <id>http://arxiv.org/abs/2402.01234v2</id>
+    <updated>2024-02-20T17:12:33Z</updated>
+    <published>2024-02-14T08:03:12Z</published>
+    <title>Diffusion Models for Tabular Data: A Survey</title>
+    <summary>  We survey the rapidly growing literature on diffusion models for tabular
+data, covering both the continuous and the discrete formulations that dominate the
+field.  Across both families we identify a shared set of design choices: the noise
+schedule, the conditioning mechanism and the choice of decoder, and we show that
+these choices, rather than the architecture, explain most of the reported differences
+in sample quality.  We close with an open-problem list covering evaluation
+protocols, missing-value handling and scaling behaviour.
+</summary>
+    <author>
+      <name>Jane Roe</name>
+    </author>
+    <author>
+      <name>John Doe</name>
+    </author>
+    <arxiv:comment xml:space="preserve">Accepted at ICML 2024</arxiv:comment>
+    <arxiv:journal_ref xml:space="preserve">ICML (2024)</arxiv:journal_ref>
+    <link href="http://arxiv.org/abs/2402.01234v2" rel="alternate" type="text/html"/>
+    <link title="doi" href="http://dx.doi.org/10.48550/arXiv.2402.01234" rel="related"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2402.01234v2" rel="related" type="application/pdf"/>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="stat.ML" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2401.05678v1</id>
+    <updated>2024-01-11T09:41:02Z</updated>
+    <published>2024-01-10T14:22:57Z</published>
+    <title>Rethinking Data Augmentation for Graph Neural Networks</title>
+    <summary>  Data augmentation is widely used to improve the generalisation of graph neural
+networks, yet its effect is reported inconsistently across benchmarks.  We show that
+the inconsistency comes from a mismatch between the augmentation distribution and
+the evaluation distribution, and we propose a reweighting scheme that aligns the
+two.  On three citation and three molecular benchmarks the scheme improves the
+worst-case accuracy without touching the mean-case accuracy.
+</summary>
+    <author>
+      <name>Alex Singer</name>
+    </author>
+    <arxiv:comment xml:space="preserve">Accepted at NeurIPS 2023</arxiv:comment>
+    <link href="http://arxiv.org/abs/2401.05678v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="http://arxiv.org/pdf/2401.05678v1" rel="related" type="application/pdf"/>
+    <arxiv:primary_category xmlns:arxiv="http://arxiv.org/schemas/atom" term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>

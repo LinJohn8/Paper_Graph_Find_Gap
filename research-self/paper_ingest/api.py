@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 import numpy as np
 
 from . import db
+from . import manifest
 from .config import venues as venue_registry
 from .config import DATA_ROOT
 from .service import graph, graph_titles, list_papers, _graph_docs
@@ -41,10 +43,27 @@ def startup(): db.init_db()
 @app.get("/api/health")
 def health(): return {"status":"ok","database":"sqlite","path":str(db.DB_PATH)}
 
+def _latest_sync_job(con,venue,year):
+    """The newest ``sync_jobs`` row of a venue-year, with its coverage verdict.
+
+    The coverage columns (``expected_count``/``coverage_status``) were added
+    after the first installations, so the extended query falls back to the old
+    one: a database that could not be widened must not turn the venue list
+    into a 500.
+    """
+    try:
+        return con.execute("SELECT status,error_message,expected_count,coverage_status FROM sync_jobs WHERE venue=? AND year=? ORDER BY id DESC LIMIT 1",(venue,year)).fetchone()
+    except sqlite3.OperationalError:
+        return con.execute("SELECT status,error_message FROM sync_jobs WHERE venue=? AND year=? ORDER BY id DESC LIMIT 1",(venue,year)).fetchone()
+
+
 @app.get("/api/venues")
 def venues():
     db.init_db()
     config=venue_registry()
+    # The manifest is read once per request: it is a small file, and the
+    # verdict for every venue-year is computed from it.
+    manifest_cache=manifest.load_manifest()
     with db.connect() as con:
         statuses=[dict(r) for r in con.execute("SELECT * FROM venues ORDER BY year DESC,name")]
     keyed={(r["id"],r["year"]):r for r in statuses}
@@ -64,10 +83,25 @@ def venues():
             stored=keyed.get((key,year))
             with db.connect() as con:
                 count=con.execute("SELECT count(DISTINCT paper_id) FROM paper_venues WHERE venue_id=? AND year=?",(key,year)).fetchone()[0]
-                job=con.execute("SELECT status,error_message FROM sync_jobs WHERE venue=? AND year=? ORDER BY id DESC LIMIT 1",(key,year)).fetchone()
+                job=_latest_sync_job(con,key,year)
+            # Coverage of the last harvest: how many papers were expected and
+            # whether the run met that expectation ("ok" / "short" / "over" /
+            # "unknown"). `None` means the venue-year was never checked.
+            expected=job["expected_count"] if job is not None and "expected_count" in job.keys() else None
+            coverage=job["coverage_status"] if job is not None and "coverage_status" in job.keys() else None
+            # A venue-year that was never harvested through the sync path (the
+            # journal collector writes its own rows) has no verdict on its job
+            # row. The expectation manifest still applies, so the verdict is
+            # computed here from the stored count: the check must not depend on
+            # which collector filled the venue.
+            if coverage is None:
+                verdict=manifest.check_venue(key,year,count,manifest_cache)
+                coverage=verdict.get("status")
+                expected=verdict.get("min_papers") if verdict.get("status")!="unknown" else None
             out.append({"id":key,"name":cfg["name"],"year":year,"provider":cfg["provider"],"type":cfg["type"],
                         "status":stored["availability_status"] if stored else "not_checked","source_venue_id":stored["source_venue_id"] if stored else None,
-                        "last_sync_at":stored["last_sync_at"] if stored else None,"year_rule":cfg.get("year_rule"),"paper_count":count,"latest_result":job["status"] if job else "not_checked","error_message":job["error_message"] if job else None})
+                        "last_sync_at":stored["last_sync_at"] if stored else None,"year_rule":cfg.get("year_rule"),"paper_count":count,"latest_result":job["status"] if job else "not_checked","error_message":job["error_message"] if job else None,
+                        "expected_count":expected,"coverage_status":coverage})
     return {"default_year":years.default_year(),"available_years":years.available_years(),
             "all_years":years.ALL_YEARS,"current_year":current,"items":out}
 

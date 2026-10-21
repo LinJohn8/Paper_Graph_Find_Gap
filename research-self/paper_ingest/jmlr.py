@@ -70,6 +70,7 @@ from typing import Any, Iterable
 import httpx
 
 from . import db
+from . import normalize
 
 __all__ = [
     "INDEX_URL",
@@ -212,6 +213,7 @@ def volume_entries(volume: int, *, force: bool = False, log=print) -> list[dict[
         title = _clean(title_match.group(1))
         if not title:
             continue
+        title = normalize.clean_text(title)
         abs_match = _ABS_RE.search(block)
         if not abs_match:
             continue
@@ -223,7 +225,14 @@ def volume_entries(volume: int, *, force: bool = False, log=print) -> list[dict[
         authors_match = _AUTHORS_RE.search(block)
         authors = []
         if authors_match:
-            authors = [a.strip() for a in _clean(authors_match.group(1)).split(",") if a.strip()]
+            # The volume page separates authors with commas, and each author is
+            # in "Given Family" order. Each name is normalised so it matches
+            # the same person as spelled by the other sources.
+            authors = [
+                normalize.normalize_author_name(a)
+                for a in _clean(authors_match.group(1)).split(",")
+                if a.strip()
+            ]
         pdf_match = _PDF_RE.search(block)
         bib_match = _BIB_RE.search(block)
         entries.append({

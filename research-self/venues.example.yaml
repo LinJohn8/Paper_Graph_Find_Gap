@@ -91,3 +91,146 @@ venues:
     provider: journal_openalex
     type: journal
     years: [2022, 2023, 2024, 2025, 2026]
+
+# Expected corpus sizes per venue-year.
+#
+# WHY THIS EXISTS
+# ---------------
+# A harvest can come back small and still report success: a provider changes
+# its markup, a rate limiter starts answering 401, a volume page is served
+# truncated. Nothing raises, the sync simply writes fewer papers, and the
+# corpus quietly loses a venue-year. These numbers are the durable expectation
+# that turns such a harvest into a *reported* shortfall.
+#
+# SEMANTICS
+# ---------
+#   min_papers  the floor: a harvest below it is reported as "short".
+#   max_papers  the ceiling: a harvest above it is reported as "over"
+#               (usually a duplicated or mis-scoped import). Optional.
+#   note        free text explaining the number; optional.
+#
+# A venue-year with no entry has no expectation and is reported as "unknown".
+# The manifest itself is optional: with no file at all, every venue-year is
+# simply "unknown" and no harvest is affected.
+#
+# WHERE THIS IS READ FROM
+# -----------------------
+# paper_ingest/manifest.py reads this block from
+# <DATA_ROOT>/expected_counts.yaml (DATA_ROOT defaults to ../Data). Copy the
+# `expected:` block below into that file to activate the check; the registry
+# loader ignores unknown top-level keys, so the two can live in one file too.
+#
+# WHERE THE NUMBERS COME FROM
+# ---------------------------
+# Measured 2026-10-21 with
+#   SELECT pv.venue_id, pv.year, count(DISTINCT pv.paper_id)
+#   FROM paper_venues pv GROUP BY 1,2
+# against Data/database/papers.sqlite (196,611 papers in total). min_papers is
+# ~90% and max_papers ~110% of the measured count, rounded to a sane step
+# (50 for >=1000 papers, 10 for >=100, 5 below), so ordinary year-to-year
+# jitter is tolerated but a real loss of a volume is not.
+expected:
+  iclr:
+    2022: {min_papers: 950, max_papers: 1250}
+    2023: {min_papers: 1400, max_papers: 1750}
+    2024: {min_papers: 2050, max_papers: 2550}
+    2025: {min_papers: 3400, max_papers: 4250}
+    2026: {min_papers: 4900, max_papers: 6050}
+  icml:
+    2022: {min_papers: 1100, max_papers: 1400}
+    2023: {min_papers: 1600, max_papers: 2050}
+    2024: {min_papers: 2350, max_papers: 2950}
+    2025: {min_papers: 3050, max_papers: 3750}
+    2026: {min_papers: 5850, max_papers: 7250}
+  neurips:
+    2022: {min_papers: 2550, max_papers: 3200}
+    2023: {min_papers: 3250, max_papers: 4050}
+    2024: {min_papers: 4050, max_papers: 5050}
+    2025: {min_papers: 5250, max_papers: 6500}
+  acl:
+    2022: {min_papers: 690, max_papers: 860}
+    2023: {min_papers: 1100, max_papers: 1400}
+    2024: {min_papers: 900, max_papers: 1200}
+    2025: {min_papers: 1750, max_papers: 2200}
+    2026: {min_papers: 2350, max_papers: 2950}
+  cvpr:
+    2022: {min_papers: 1850, max_papers: 2300}
+    2023: {min_papers: 2100, max_papers: 2650}
+    2024: {min_papers: 2450, max_papers: 3050}
+    2025: {min_papers: 2650, max_papers: 3250}
+    2026: {min_papers: 3600, max_papers: 4450}
+  tmlr:
+    2022: {min_papers: 190, max_papers: 240}
+    2023: {min_papers: 540, max_papers: 680}
+    2024: {min_papers: 850, max_papers: 1050}
+    2025: {min_papers: 1250, max_papers: 1600}
+    2026: {min_papers: 1500, max_papers: 1900}
+  nature:
+    2022: {min_papers: 3100, max_papers: 3850}
+    2023: {min_papers: 3250, max_papers: 4050}
+    2024: {min_papers: 3250, max_papers: 4050}
+    2025: {min_papers: 3350, max_papers: 4150}
+    2026: {min_papers: 2700, max_papers: 3350}
+  naturemi:
+    2022: {min_papers: 140, max_papers: 180}
+    2023: {min_papers: 150, max_papers: 190}
+    2024: {min_papers: 150, max_papers: 200}
+    2025: {min_papers: 170, max_papers: 220}
+    2026: {min_papers: 130, max_papers: 170}
+  naturecomms:
+    2022: {min_papers: 6800, max_papers: 8350}
+    2023: {min_papers: 7250, max_papers: 8950}
+    # 2024 onwards hit OpenAlex' unkeyed deep-paging ceiling of 10,000 works
+    # per year, so the measured count is the cap, not the journal's real size.
+    2024: {min_papers: 9000, max_papers: 11000, note: "Measured count is the OpenAlex unkeyed deep-paging ceiling (10,000 works)."}
+    2025: {min_papers: 9000, max_papers: 11000, note: "Measured count is the OpenAlex unkeyed deep-paging ceiling (10,000 works)."}
+    2026: {min_papers: 8950, max_papers: 11000, note: "Measured count is the OpenAlex unkeyed deep-paging ceiling (10,000 works)."}
+  science:
+    2022: {min_papers: 1550, max_papers: 1950}
+    2023: {min_papers: 1500, max_papers: 1850}
+    2024: {min_papers: 1550, max_papers: 1950}
+    2025: {min_papers: 1550, max_papers: 1950}
+    2026: {min_papers: 1250, max_papers: 1600}
+  cell:
+    2022: {min_papers: 370, max_papers: 470}
+    2023: {min_papers: 400, max_papers: 500}
+    2024: {min_papers: 510, max_papers: 640}
+    2025: {min_papers: 430, max_papers: 540}
+    2026: {min_papers: 410, max_papers: 510}
+  tpami:
+    2022: {min_papers: 550, max_papers: 680}
+    2023: {min_papers: 600, max_papers: 750}
+    2024: {min_papers: 600, max_papers: 750}
+    2025: {min_papers: 840, max_papers: 1040}
+    2026: {min_papers: 760, max_papers: 930}
+  ijcv:
+    2022: {min_papers: 160, max_papers: 200}
+    2023: {min_papers: 180, max_papers: 240}
+    2024: {min_papers: 300, max_papers: 370}
+    2025: {min_papers: 230, max_papers: 290}
+    2026: {min_papers: 390, max_papers: 490}
+  jmlr:
+    2022: {min_papers: 310, max_papers: 390}
+    2023: {min_papers: 360, max_papers: 450}
+    2024: {min_papers: 370, max_papers: 470}
+    2025: {min_papers: 270, max_papers: 350}
+    # No JMLR volume exists for 2026 yet, so any count is acceptable here.
+    2026: {min_papers: 0, note: "No JMLR volume for 2026 is published yet."}
+  prl:
+    2022: {min_papers: 1850, max_papers: 2350}
+    2023: {min_papers: 1900, max_papers: 2400}
+    2024: {min_papers: 2200, max_papers: 2750}
+    2025: {min_papers: 2900, max_papers: 3600}
+    2026: {min_papers: 2050, max_papers: 2550}
+  jacs:
+    2022: {min_papers: 2250, max_papers: 2800}
+    2023: {min_papers: 2650, max_papers: 3300}
+    2024: {min_papers: 3250, max_papers: 4000}
+    2025: {min_papers: 4150, max_papers: 5150}
+    2026: {min_papers: 3700, max_papers: 4600}
+  lancet:
+    2022: {min_papers: 1200, max_papers: 1550}
+    2023: {min_papers: 1300, max_papers: 1600}
+    2024: {min_papers: 1350, max_papers: 1700}
+    2025: {min_papers: 1150, max_papers: 1450}
+    2026: {min_papers: 950, max_papers: 1250}

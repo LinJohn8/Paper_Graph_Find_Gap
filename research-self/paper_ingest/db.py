@@ -101,7 +101,10 @@ def init_db(path: Path | None = None) -> None:
           id INTEGER PRIMARY KEY AUTOINCREMENT, venue TEXT NOT NULL, year INTEGER NOT NULL, provider TEXT NOT NULL,
           status TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, fetched_count INTEGER DEFAULT 0,
           inserted_count INTEGER DEFAULT 0, updated_count INTEGER DEFAULT 0, skipped_count INTEGER DEFAULT 0,
-          error_count INTEGER DEFAULT 0, error_message TEXT
+          error_count INTEGER DEFAULT 0, error_message TEXT,
+          -- Coverage of the harvest: the floor the run was expected to reach and
+          -- the verdict of that comparison (ok / short / over / unknown).
+          expected_count INTEGER, coverage_status TEXT
         );
         CREATE TABLE IF NOT EXISTS sync_state (
           venue TEXT NOT NULL, year INTEGER NOT NULL, cursor TEXT, checkpoint TEXT, updated_at TEXT NOT NULL,
@@ -124,6 +127,7 @@ def init_db(path: Path | None = None) -> None:
         CREATE INDEX IF NOT EXISTS paper_venues_year_only_idx ON paper_venues(year);
         CREATE INDEX IF NOT EXISTS papers_status_idx ON papers(status);
         """)
+        _ensure_sync_job_coverage_columns(con)
         # Phase 1 accidentally added UNIQUE(id), preventing the configured
         # registry from retaining more than one year. Rebuild only that small
         # table when the legacy index is present; existing rows are preserved.
@@ -149,6 +153,30 @@ def init_db(path: Path | None = None) -> None:
             con.execute("DROP TABLE venues_legacy")
             con.execute("PRAGMA foreign_keys=ON")
         _align_fts_rowids(con)
+
+
+def _ensure_sync_job_coverage_columns(con: sqlite3.Connection) -> None:
+    """Add the coverage columns to ``sync_jobs`` on databases that predate them.
+
+    WHY
+    ---
+    ``CREATE TABLE IF NOT EXISTS`` never widens an existing table, so an
+    installation that was created before the coverage check would keep a
+    ``sync_jobs`` table without ``expected_count``/``coverage_status`` and
+    every coverage write would fail with "no such column".  The column list
+    is therefore checked first and the table is widened with a guarded
+    ``ALTER TABLE`` -- the same "migrate in place, keep the data" pattern the
+    ``venues`` rebuild below uses.
+
+    The guard is a column check rather than an exception handler so a
+    concurrent migration between the check and the ALTER cannot turn into a
+    duplicate-column error.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('sync_jobs')")}
+    if "expected_count" not in columns:
+        con.execute("ALTER TABLE sync_jobs ADD COLUMN expected_count INTEGER")
+    if "coverage_status" not in columns:
+        con.execute("ALTER TABLE sync_jobs ADD COLUMN coverage_status TEXT")
 
 
 def _align_fts_rowids(con: sqlite3.Connection) -> None:

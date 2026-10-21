@@ -201,6 +201,52 @@ new `paper_venues(year)` index for year-only queries):
 is banned outright) and the results (no duplicates, stable totals, <5 s on a
 20k-row corpus).
 
+## Collector hardening (2026-10)
+
+The harvesting layer was reviewed along six axes — resilience, source coverage,
+data quality, observability, scale, testability — and the gaps that mattered
+were closed:
+
+- **`paper_ingest/crawl.py` — one policy for every collector.** Four modules
+  had each grown their own answer to "is this failure retryable?", "how long
+  do we wait?" and "when do we give up?", and the differences were where the
+  bugs lived. The shared base states them once: `TransientError` /
+  `PermanentError` / `BlockedError`, a token-bucket `RateLimiter`, a
+  `RetryPolicy` (exponential backoff with jitter, `Retry-After` honoured but
+  clamped so a broken header cannot stall a sync), a proportional
+  `CircuitBreaker`, and a `CrawlRecorder` for run statistics. It is now the
+  actual implementation behind `PoliteHttp`'s backoff and the journal
+  backfill's breaker, not a parallel copy.
+- **`paper_ingest/manifest.py` — a silent empty harvest is now impossible.**
+  The recurring failure was a provider quietly returning less (or nothing)
+  while the sync reported success. Each venue-year has an expected size
+  (`Data/expected_counts.yaml`, generated from the measured corpus with min at
+  ~90% and max at ~110%); a harvest that lands short is reported as `short`
+  on the venue status and on its sync job — never an exception, never silent.
+  `/api/venues` reports `expected_count` and `coverage_status` per venue-year
+  (84 checked, 84 ok at the time of writing).
+- **`paper_ingest/normalize.py` — one spelling per field.** The sources
+  disagree on shape: `"Joshua R. Wang"` vs `"Wang, Joshua R."` vs `"J. Wang"`,
+  `https://doi.org/10.x/y` vs `doi:10.x/y` vs `10.x/y`, and scraped titles
+  carry LaTeX (`$O(n \log n)$`, `\emph{...}`). Normalised display forms and
+  comparison keys live here, so an author search finds a person under every
+  spelling and the index is not polluted with markup. LaTeX *formatting*
+  commands are dropped while *symbolic* ones (`\log`) are kept.
+- **`paper_ingest/replay.py` — the collectors can be tested offline.**
+  Recorded HTTP responses replayed through the real parsing code: a publisher
+  changing its markup or an API changing a field now fails a test instead of
+  silently emptying a harvest. `tests/fixtures/` holds structurally faithful
+  payloads for OpenAlex, jmlr.org, Europe PMC and arXiv.
+- **A DBLP source was evaluated and rejected**: it answers `202` (accepted,
+  result not ready) for minutes at a time and then `429` — even at two seconds
+  apart — so it is not usable as a supplementary source. OpenAlex already
+  indexes the same venues.
+
+**Operational note**: OpenAlex meters requests per IP against a small shared
+daily budget when no API key is supplied; a harvest burst exhausts it and the
+API then answers `401`. Set `OPENALEX_API_KEY` (free) for a stable budget, and
+`PAPER_CONTACT_EMAIL` for the polite pool.
+
 ## Start on Windows
 
 Requirements: Python 3.11+, Node.js 20.9+ and PowerShell.

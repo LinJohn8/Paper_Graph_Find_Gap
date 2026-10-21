@@ -15,6 +15,7 @@ import numpy as np
 from . import db
 from .config import DATA_ROOT, venues
 from .openreview import OpenReview, normalize, raw_path, write_raw
+from . import manifest
 from . import semantics
 from . import years
 
@@ -22,6 +23,94 @@ from . import years
 def venue_id(key: str, config: dict[str, Any], year: int) -> str:
     pattern = config.get("venue_id_pattern")
     return pattern.format(year=year) if pattern else ""
+
+
+def apply_coverage_check(venue: str, year: int, *, job_id: int | None = None,
+                         con: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Compare the stored size of one venue-year with its recorded expectation.
+
+    WHY THIS EXISTS
+    ---------------
+    A harvest can come back small and still report success: a provider changes
+    its markup, a rate limiter starts answering 401, a volume page is served
+    truncated.  Nothing raises, so the corpus quietly loses a venue-year.  This
+    check turns that silence into a recorded fact.
+
+    The verdict is written onto the ``sync_jobs`` row (``expected_count`` holds
+    the floor the count was checked against, ``coverage_status`` the verdict),
+    so the API can show the state without re-running the comparison.
+
+    A MISSING OR BROKEN MANIFEST IS NOT AN ERROR HERE
+    --------------------------------------------------
+    The manifest is optional, so an absent file yields an ``unknown`` verdict
+    and a present-but-unreadable one is caught by the caller.  A coverage
+    check must never turn a successful harvest into an exception: a short
+    harvest is a *reported* outcome, not a crash.
+    """
+    expectations = manifest.load_manifest()
+    owned = con is None
+    if owned:
+        # The coverage columns are added by init_db(); without it a database
+        # that has not been touched yet would have no sync_jobs table at all.
+        db.init_db()
+    connection = con if con is not None else db.connect()
+    try:
+        actual = connection.execute(
+            "SELECT count(DISTINCT paper_id) FROM paper_venues WHERE venue_id=? AND year=?",
+            (venue, year),
+        ).fetchone()[0]
+        verdict = manifest.check_venue(venue, year, int(actual), manifest=expectations)
+        # `expected_count` is the floor the count was compared against: the
+        # number below which the harvest counts as short.
+        expected_count = verdict.get("min_papers")
+        if job_id is not None:
+            connection.execute(
+                "UPDATE sync_jobs SET expected_count=?,coverage_status=? WHERE id=?",
+                (expected_count, verdict["status"], job_id),
+            )
+        else:
+            # No job id at hand: the newest row of this venue-year is the run
+            # that just finished.
+            connection.execute(
+                "UPDATE sync_jobs SET expected_count=?,coverage_status=? WHERE id=("
+                "SELECT id FROM sync_jobs WHERE venue=? AND year=? ORDER BY id DESC LIMIT 1)",
+                (expected_count, verdict["status"], venue, year),
+            )
+        if owned:
+            connection.commit()
+    finally:
+        if owned:
+            connection.close()
+    return verdict
+
+
+def sync_official(venue: str, year: int, limit: int | None = None, dry_run: bool = False,
+                  workers: int | None = None) -> dict[str, Any]:
+    """Harvest an official proceedings venue-year and check the coverage.
+
+    The scraping itself lives in :mod:`paper_ingest.official`; this wrapper
+    adds the one thing the raw harvester cannot do by itself: compare the
+    number of stored papers with the expectation for that venue-year, so a
+    truncated or blocked harvest is reported instead of passing unnoticed.
+
+    The coverage verdict is added to the result under ``coverage`` and
+    recorded on the ``sync_jobs`` row.  A failing check never fails the
+    harvest: the verdict is the deliverable, not an error.
+    """
+    from .official import sync_official as _sync_official
+
+    result = _sync_official(venue, year, limit=limit, dry_run=dry_run, workers=workers)
+    if dry_run or limit is not None:
+        # A dry run stores nothing and a limited run stores part of the
+        # volume on purpose; both would report a bogus "short" verdict.
+        return result
+    if result.get("status") not in ("success", "completed"):
+        return result
+    try:
+        result["coverage"] = apply_coverage_check(venue, year)
+    except Exception:  # noqa: BLE001 - a coverage check must never fail a harvest
+        pass
+    return result
 
 
 async def sync_one(key: str, year: int, *, full: bool = False, dry_run: bool = False,
@@ -131,6 +220,13 @@ async def sync_one(key: str, year: int, *, full: bool = False, dry_run: bool = F
                             (key,year,None,datetime.now(timezone.utc).isoformat(),datetime.now(timezone.utc).isoformat()))
         result = {"venue":key,"year":year,"status":status,"source_venue_id":source_id,"invitation":invitation,**counters}
         if status == "completed" and not dry_run:
+            # Compare the harvested size with the recorded expectation. A short
+            # harvest is a reported outcome, never an exception, so the check
+            # is guarded: a broken manifest must not fail a good harvest.
+            try:
+                result["coverage"] = apply_coverage_check(key, year, job_id=job_id)
+            except Exception:  # noqa: BLE001 - a coverage check must never fail a harvest
+                pass
             result["graph"] = generate_graph(key, year)
         return result
     except Exception as exc:
@@ -159,7 +255,8 @@ async def sync_many(keys: list[str], year: int, **options: Any) -> list[dict[str
     results = []
     for key in keys:
         if key in ("icml", "acl", "cvpr", "neurips"):
-            from .official import sync_official
+            # The service-level wrapper adds the coverage check to the raw
+            # harvester, so an official import that came back short is reported.
             try:
                 result = sync_official(key, year, limit=options.get("limit"), dry_run=options.get("dry_run",False))
                 # Keep the map in sync with every successful official import.

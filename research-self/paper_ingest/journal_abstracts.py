@@ -50,6 +50,7 @@ from typing import Any
 import httpx
 
 from . import db
+from . import crawl
 
 __all__ = ["backfill_journal_abstracts", "fetch_landing_abstract"]
 
@@ -369,11 +370,15 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
             page other times, so a run of 19 misses followed by 1 hit would
             reset the counter and the lane would grind through the batch at
             ~1 paper per 10 seconds, recovering nothing.
+
+            The breaker itself is :class:`paper_ingest.crawl.CircuitBreaker`,
+            the one the rest of the collector shares.
             """
             if not batch:
                 return 0
             attempted = 0
             hits = 0
+            breaker = crawl.CircuitBreaker(min_hit_rate=min_hit_rate, window=50) if min_hit_rate else None
             with ThreadPoolExecutor(max_workers=max(1, pool_size)) as pool:
                 futures = {pool.submit(fn, row): row for row in batch}
                 for position, future in enumerate(as_completed(futures)):
@@ -406,18 +411,16 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
                         # invisible to any other reader until it finished, and a
                         # crash would lose the whole batch.
                         con.commit()
-                    if min_hit_rate and attempted % 50 == 0:
-                        rate = hits / attempted
-                        if rate < min_hit_rate:
-                            stats["lane_gave_up"] = stats.get("lane_gave_up", 0) + 1
-                            stats["lane_attempted"] = stats.get("lane_attempted", 0) + attempted
-                            LOGGER.info(
-                                "[journal_abstracts] %s %s: hit rate %.0f%% over %d papers "
-                                "is below %.0f%%; giving up on this channel "
-                                "(%d papers left unattempted)",
-                                venue, year, rate * 100, attempted, min_hit_rate * 100,
-                                len(batch) - attempted)
-                            break
+                    if breaker is not None and breaker.record(bool(abstract)):
+                        stats["lane_gave_up"] = stats.get("lane_gave_up", 0) + 1
+                        stats["lane_attempted"] = stats.get("lane_attempted", 0) + attempted
+                        LOGGER.info(
+                            "[journal_abstracts] %s %s: hit rate %.0f%% over %d papers "
+                            "is below %.0f%%; giving up on this channel "
+                            "(%d papers left unattempted)",
+                            venue, year, (breaker.hit_rate or 0.0) * 100, attempted,
+                            min_hit_rate * 100, len(batch) - attempted)
+                        break
             return attempted
 
         # The fast lane first, so the papers that carry real abstracts are in

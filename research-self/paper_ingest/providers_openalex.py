@@ -68,6 +68,9 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from . import crawl
+from . import normalize
+
 __all__ = [
     "DEFAULT_MAILTO",
     "OPENALEX_API",
@@ -388,6 +391,16 @@ class PoliteHttp:
         self._max_attempts = max(1, int(max_attempts))
         self._backoff_base = max(0.0, float(backoff_base))
         self._backoff_max = max(0.0, float(backoff_max))
+        # The shared retry policy owns the backoff arithmetic (see
+        # paper_ingest/crawl.py). It is constructed with the values this class
+        # has always used, so the behaviour is unchanged -- only the place the
+        # rule lives is now shared with the other collectors.
+        self._policy = crawl.RetryPolicy(
+            attempts=self._max_attempts,
+            base_delay=self._backoff_base,
+            max_delay=self._backoff_max,
+            jitter=0.0,  # the previous backoff had no jitter; keep it that way
+        )
         self._semaphore: threading.BoundedSemaphore | None = (
             threading.BoundedSemaphore(max_concurrency) if max_concurrency > 0 else None
         )
@@ -430,10 +443,15 @@ class PoliteHttp:
             setattr(self.stats, field_name, getattr(self.stats, field_name) + 1)
 
     def _backoff(self, attempt: int, retry_after: float | None) -> float:
-        """Seconds to wait before attempt ``attempt + 1``."""
-        if retry_after is not None:
-            return min(retry_after, self._backoff_max)
-        return min(self._backoff_base * (2 ** attempt), self._backoff_max)
+        """Seconds to wait before attempt ``attempt + 1``.
+
+        The arithmetic lives in :class:`paper_ingest.crawl.RetryPolicy` so
+        that every collector in this package waits the same way for the same
+        reason. The policy clamps a server-supplied ``Retry-After`` to
+        ``backoff_max``: obeying it is polite, but a broken or hostile header
+        must not be able to stall a sync indefinitely.
+        """
+        return self._policy.delay_for(attempt, retry_after)
 
     def _send(self, url: str, params: Mapping[str, Any] | None) -> httpx.Response:
         if self._semaphore is None:
@@ -609,7 +627,10 @@ def clean_markup_text(value: Any) -> str | None:
        ``<jats:italic>FLAPS</jats:italic>,`` into ``FLAPS ,``;
     3. if entity-encoded tags were present (``&lt;jats:p&gt;``, occasionally
        double-encoded), unescape and strip once more;
-    4. unescape entities, then collapse whitespace.
+    4. unescape entities, then collapse whitespace;
+    5. finally drop the LaTeX leftovers that survive in scraped titles and
+       abstracts (``$O(n \log n)$``, ``\emph{...}``) -- see
+       :func:`paper_ingest.normalize.clean_text`.
 
     Returns ``None`` for missing/blank input so the DB stores NULL rather than
     an empty string.
@@ -621,13 +642,21 @@ def clean_markup_text(value: Any) -> str | None:
         text = _strip_markup(html.unescape(text))
     text = html.unescape(text)
     text = _collapse_whitespace(text)
+    text = normalize.clean_text(text)
     return text or None
 
 
 def _clean_title(value: Any) -> str | None:
+    """A title as plain text: no markup, no LaTeX, single spaces.
+
+    The LaTeX step matters for the index: a scraped title like
+    ``"$O(n \\log n)$ Bounds"`` otherwise lands in FTS with the command
+    fragments attached, and a query for "log" misses it.
+    """
     if not isinstance(value, str):
         return None
     text = _collapse_whitespace(html.unescape(_strip_markup(value)))
+    text = normalize.clean_text(text)
     return text or None
 
 
@@ -1188,6 +1217,12 @@ class OpenAlexProvider:
         OpenAlex nests the name at ``authorships[i].author.display_name``;
         ``raw_author_name`` is the fallback for records whose author entity is
         unresolved (common for proceedings-only works).
+
+        The name is put through
+        :func:`paper_ingest.normalize.normalize_author_name` so that the
+        spellings different sources use for one person -- "Joshua R. Wang",
+        "Wang, Joshua R." -- land on one form in the corpus, and an author
+        search finds both.
         """
         names: list[str] = []
         for entry in _as_sequence(authorships):
@@ -1196,7 +1231,7 @@ class OpenAlexProvider:
             if not isinstance(name, str) or not name.strip():
                 name = entry_map.get("raw_author_name")
             if isinstance(name, str) and name.strip():
-                names.append(_collapse_whitespace(name))
+                names.append(normalize.normalize_author_name(name))
         return names
 
     @staticmethod
@@ -1572,12 +1607,18 @@ class CrossrefProvider:
 
         Organisation-level contributors carry ``name`` instead of given/family and
         are kept verbatim -- dropping them would misattribute consortium papers.
+
+        Crossref is one of the sources that spells a name "Family, Given", so
+        the result goes through
+        :func:`paper_ingest.normalize.normalize_author_name`: without it the
+        same researcher appears under two identities in the corpus depending on
+        which source delivered the paper.
         """
         names: list[str] = []
         for entry in _as_sequence(authors):
             entry_map = _as_mapping(entry)
             if isinstance(entry_map.get("name"), str) and entry_map["name"].strip():
-                names.append(_collapse_whitespace(entry_map["name"]))
+                names.append(normalize.normalize_author_name(entry_map["name"]))
                 continue
             given = entry_map.get("given")
             family = entry_map.get("family")
@@ -1587,7 +1628,7 @@ class CrossrefProvider:
                 if isinstance(part, str) and part.strip()
             ]
             if parts:
-                names.append(" ".join(parts))
+                names.append(normalize.normalize_author_name(" ".join(parts)))
         return names
 
     @staticmethod
