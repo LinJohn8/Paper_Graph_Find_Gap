@@ -99,12 +99,12 @@ Every venue-year was rebuilt from the publishers' own indexes (ICLR virtual site
 
 | Year | Conference papers | Journal papers | Total | Conference abstract coverage |
 |---:|---:|---:|---:|---:|
-| 2022 | 8,294 | 21,021 | 29,315 | 97% |
-| 2023 | 11,291 | 22,406 | 33,697 | 94% |
-| 2024 | 14,227 | 25,706 | 39,933 | 93% |
-| 2025 | 19,451 | 27,590 | 47,041 | 92% |
+| 2022 | 8,294 | 21,374 | 29,668 | 97% |
+| 2023 | 11,291 | 22,807 | 34,098 | 94% |
+| 2024 | 14,227 | 26,128 | 40,355 | 93% |
+| 2025 | 19,451 | 27,899 | 47,350 | 92% |
 | 2026 | 20,412 | 24,728 | 45,140 | 91% |
-| **Total** | **73,675** | **121,451** | **195,126** | **93%** |
+| **Total** | **73,675** | **122,936** | **196,611** | **93%** |
 
 Known gaps: NeurIPS 2026 proceedings are not published yet (December 2026); TMLR abstracts are behind an OpenReview Cloudflare challenge (metadata is complete); 122 measured title-variant cross-source twins are retained rather than deleted. Root causes, fixes, per-cell expected-vs-actual numbers, and the rollback files are documented in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md).
 
@@ -113,38 +113,52 @@ Known gaps: NeurIPS 2026 proceedings are not published yet (December 2026); TMLR
 The corpus was conference-only, which biased retrieval toward CS conference
 literature. It now also carries high-impact **journals** with the same metadata
 scope as everything else (title + abstract + authors + DOI + year; no PDFs).
-**121,451 journal papers across 15 titles × 2022–2026; 195,126 papers total.**
+**122,936 journal papers across 15 titles × 2022–2026; 196,611 papers total.**
 
 - **Source**: OpenAlex journal source ids (`paper_ingest/provider_journals.py`),
   15 curated titles across Springer Nature (Nature, Nature MI, Nature
   Communications, Nature Methods/Neuroscience, npj QI), AAAS/Cell Press
   (Science, Cell, Neuron), IEEE (TPAMI, IJCV), JMLR, APS (PRL) and
   chemistry/medicine (JACS, The Lancet). `type:article` only — editorials and
-  corrections are excluded by design.
+  corrections are excluded by design. **JMLR is the exception**: OpenAlex
+  attaches almost no recent works to its source (per-year count 0 for
+  2022–2024/2026), so it comes from the publisher's own site instead
+  (`paper_ingest/jmlr.py`, the same jmlr.org that serves TMLR) — 1,486 papers
+  with 100% abstract coverage.
 - **Abstract recovery** (measured, per journal):
 
   | Journal | Papers | Abstract coverage |
   |---|---:|---:|
   | Nature Communications | 45,655 | 99% |
   | JACS | 17,956 | 99% |
-  | Nature | 17,568 | 23%¹ |
+  | Nature | 17,568 | 28%¹ |
   | Physical Review Letters | 12,271 | 97% |
   | Science | 8,392 | 56%¹ |
   | The Lancet | 6,755 | 5%² |
   | IEEE TPAMI | 3,747 | 98% |
-  | Cell | 2,389 | 43%² |
-  | IJCV | 1,430 | 99% |
+  | Cell | 2,389 | 86%³ |
+  | JMLR | 1,486 | 100% |
+  | IJCV | 1,430 | 100% |
   | Nature MI / Methods / Neuron / npj QI | 5,287 | 26–99%¹ |
-  | **All journals** | **121,451** | **76%** |
+  | **All journals** | **122,936** | **78%** |
 
-  ¹ Springer/AAAS landing pages carry the abstract as
-  `<meta property="og:description">` (measured 12/12 recovered), so
-  `paper_ingest/journal_abstracts.py` backfills at a polite 1 rps. The pass is
-  resumable and idempotent — re-running `_run_backfill.py` continues where it
-  stopped (IJCV reached 99% this way).
-  ² Elsevier (Cell, The Lancet) is behind a bot wall: doi.org serves a
-  meta-refresh interstitial and direct article URLs 403, so those rows keep
-  their OpenAlex metadata rather than burning a timeout each.
+  Two channels, tried in order (`paper_ingest/journal_abstracts.py`):
+  1. **Europe PMC** (EBI's public API, no key) — carries the research articles
+     with their *full* abstract. Measured 39/40 hits on the real pending set at
+     2.2 lookups/second, stable at 10 concurrent requests. This is what took
+     Cell from 43% to 86% and IJCV to 100%.
+  2. **The publisher's landing page** — the article's abstract block
+     (`<div id="Abs1-content">`, 1,666 chars) or `og:description` (a 243-char
+     teaser). Needed for what Europe PMC does not index.
+
+  ¹ The remaining gap is the data, not the collector: Nature's *news* DOIs
+     (`10.1038/d41586-*`) are not research articles, Europe PMC does not carry
+     them, and the publisher serves them a challenge page. The pass detects
+     that and stops rather than burning an hour for nothing.
+  ² The Lancet's abstracts are withheld by the publisher (PubMed and Europe
+     PMC both show none for them) — a copyright policy, not a bug.
+  ³ Elsevier's site is behind a bot wall (doi.org serves a meta-refresh
+     interstitial, direct URLs 403), so Elsevier rows rely on Europe PMC.
 - **Harvest**: `python _run_journals.py [journal] [year] [--limit N]
   [--no-backfill]` (idempotent). Measured OpenAlex limits, all handled:
   - **Cursor paging is gated** (HTTP 401 without a key) — the provider pages by
@@ -154,10 +168,6 @@ scope as everything else (title + abstract + authors + DOI + year; no PDFs).
     their first 10,000 articles; the year is still recorded.
   - **Per-IP daily budget** — HTTP 401 when exhausted; rerun the next day or
     set a free `OPENALEX_API_KEY`.
-  - **JMLR is a known gap**: OpenAlex attaches almost no recent works to its
-    source (per-year count 0 for 2022–2024/2026; the source's 1,269 works are all
-    older). A future harvester could scrape jmlr.org/papers/ the way TMLR is
-    scraped from jmlr.org/tmlr/papers/.
 
 ## Semantics upgrade (2026-10)
 
@@ -165,15 +175,15 @@ The semantic space is finer: TF-IDF vocabulary 1024 → **20,000 features** with
 1–3-grams, and the SVD width 48 → **128 dims** (global model; per-cell graphs
 follow suit). That is what lets rare-but-precise terms survive the projection —
 the old 1024-feature space was why "SECI" produced a zero query vector — while
-search stays a sub-second matrix–vector product (float32 195k×128).
+search stays a sub-second matrix–vector product (float32 197k×128).
 
-`python -m paper_ingest.global_layout` rebuilds the global model (~17 min at
-195k papers); it must be re-run after any corpus change so the all-years space
+`python -m paper_ingest.global_layout` rebuilds the global model (~20 min at
+197k papers); it must be re-run after any corpus change so the all-years space
 covers the new papers.
 
-## Performance at 195k papers
+## Performance at 197k papers
 
-Growing the corpus 2.6× exposed a query plan that had been fine at 73k:
+Growing the corpus 2.7× exposed a query plan that had been fine at 73k:
 `/api/papers` filtered venues with a correlated `EXISTS (SELECT 1 FROM
 paper_venues …)` per paper row, so SQLite scanned all 195k papers and probed
 `paper_venues` for each — **236 s for one page**. The filter now *drives* from

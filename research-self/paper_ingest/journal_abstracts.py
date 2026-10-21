@@ -358,18 +358,33 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
         # Streaming: each result is written as it arrives, so a long year-long
         # batch shows progress and a crash loses at most the in-flight window.
         # The database work stays on this thread (one connection, one writer).
-        def _run(batch, fn, pool_size):
+        def _run(batch, fn, pool_size, *, min_hit_rate: float = 0.0):
+            """Run one lane; returns the number of papers it attempted.
+
+            ``min_hit_rate`` is a proportional circuit breaker: after every 50
+            papers the lane looks at its own hit rate and gives up if it is
+            below the threshold. A *consecutive*-miss counter is not enough
+            here, because the publisher's refusals are intermittent -- Nature's
+            news pages answer with an abstract sometimes and with a challenge
+            page other times, so a run of 19 misses followed by 1 hit would
+            reset the counter and the lane would grind through the batch at
+            ~1 paper per 10 seconds, recovering nothing.
+            """
             if not batch:
-                return
+                return 0
+            attempted = 0
+            hits = 0
             with ThreadPoolExecutor(max_workers=max(1, pool_size)) as pool:
                 futures = {pool.submit(fn, row): row for row in batch}
                 for position, future in enumerate(as_completed(futures)):
                     row = futures[future]
+                    attempted += 1
                     try:
                         abstract, source = future.result()
                     except Exception:  # noqa: BLE001 - one bad page must not stop the batch
                         abstract, source = None, "none"
                     if abstract:
+                        hits += 1
                         con.execute(
                             "UPDATE papers SET abstract=?,updated_at_source=?,last_seen_at=? WHERE id=?",
                             (abstract, db.now(), db.now(), row["id"]),
@@ -391,12 +406,28 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
                         # invisible to any other reader until it finished, and a
                         # crash would lose the whole batch.
                         con.commit()
+                    if min_hit_rate and attempted % 50 == 0:
+                        rate = hits / attempted
+                        if rate < min_hit_rate:
+                            stats["lane_gave_up"] = stats.get("lane_gave_up", 0) + 1
+                            stats["lane_attempted"] = stats.get("lane_attempted", 0) + attempted
+                            LOGGER.info(
+                                "[journal_abstracts] %s %s: hit rate %.0f%% over %d papers "
+                                "is below %.0f%%; giving up on this channel "
+                                "(%d papers left unattempted)",
+                                venue, year, rate * 100, attempted, min_hit_rate * 100,
+                                len(batch) - attempted)
+                            break
+            return attempted
 
         # The fast lane first, so the papers that carry real abstracts are in
-        # the corpus even if the slow lane is still running.
-        _run(fast, _fetch_epmc, epmc_workers)
+        # the corpus even if the slow lane is still running. Both lanes have a
+        # proportional circuit breaker: a channel whose hit rate collapses
+        # would otherwise grind through the batch for hours and recover
+        # nothing.
+        _run(fast, _fetch_epmc, epmc_workers, min_hit_rate=0.25)
         con.commit()
-        _run(slow, _fetch_page, workers)
+        _run(slow, _fetch_page, workers, min_hit_rate=0.25)
         con.commit()
     finally:
         con.close()
