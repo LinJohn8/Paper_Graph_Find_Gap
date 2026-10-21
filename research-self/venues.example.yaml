@@ -70,7 +70,10 @@ venues:
     years: [2022, 2023, 2024, 2025, 2026]
   jmlr:
     name: JMLR
-    provider: journal_openalex
+    # JMLR is NOT in OpenAlex for 2022-2026 (measured: that source id returns
+    # 0 works per year), so it is harvested from the publisher's own site:
+    # `python -m paper_ingest.jmlr --year 2024`
+    provider: jmlr_site
     type: journal
     years: [2022, 2023, 2024, 2025, 2026]
   prl:

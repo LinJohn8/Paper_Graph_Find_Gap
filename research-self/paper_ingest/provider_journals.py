@@ -90,13 +90,14 @@ JOURNAL_SOURCES: dict[str, tuple[str, str]] = {
     "tpami": ("S199944782", "IEEE Transactions on Pattern Analysis and Machine Intelligence"),
     "ijcv": ("S25538012", "International Journal of Computer Vision"),
     # JMLR (the ML journal the conference corpus always lacked)
-    # KNOWN GAP: OpenAlex attaches almost no works to this source for recent
-    # years (measured 2026-10-21: per-year count 0 for 2022-2024/2026, 1 for
-    # 2025, while the source's total works_count is 1269 — all older papers).
-    # Recent JMLR papers are published at jmlr.org, which OpenAlex does not
-    # index under this source; a future harvester could scrape jmlr.org/papers/
-    # the way tmlr.py scrapes jmlr.org/tmlr/papers/. Until then this key
-    # harvests 0 rows, which the runner records as a truthful empty year.
+    # KNOWN GAP -> handled by paper_ingest/jmlr.py instead: OpenAlex attaches
+    # almost no works to this source for recent years (measured 2026-10-21:
+    # per-year count 0 for 2022-2024/2026, 1 for 2025, while the source's total
+    # works_count is 1269 — all older papers). The publisher's own site
+    # (jmlr.org/papers/ — the same host that serves TMLR) does carry every paper
+    # with its abstract, so JMLR is harvested from there. The key stays in this
+    # registry because venues.yaml is keyed by it and the UI lists venues from
+    # there; importing it through *this* provider would yield zero rows.
     "jmlr": ("S118988714", "Journal of Machine Learning Research"),
     # APS
     "prl": ("S24807848", "Physical Review Letters"),
