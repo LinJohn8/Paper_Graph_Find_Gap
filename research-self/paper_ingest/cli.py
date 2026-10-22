@@ -240,13 +240,22 @@ def _cmd_sync_api_years(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _journal_keys(venue: str) -> list[str]:
+    """The journal keys a command should act on.
+
+    Both registries are consulted: the OpenAlex one (the journals the corpus
+    already has) and the Europe PMC one (which adds the titles OpenAlex never
+    indexed). A venue that is in neither is an error -- a typo should not
+    silently harvest nothing.
+    """
+    from .provider_epmc import EPMC_JOURNALS
     from .provider_journals import JOURNAL_SOURCES
 
+    known = set(JOURNAL_SOURCES) | set(EPMC_JOURNALS)
     if venue == "all":
-        return sorted(JOURNAL_SOURCES)
-    if venue not in JOURNAL_SOURCES:
+        return sorted(known)
+    if venue not in known:
         raise ValueError(
-            f"unknown journal {venue!r}; known: {', '.join(sorted(JOURNAL_SOURCES))}")
+            f"unknown journal {venue!r}; known: {', '.join(sorted(known))}")
     return [venue]
 
 
@@ -265,38 +274,56 @@ def _cmd_journals(args: argparse.Namespace) -> dict[str, Any]:
 def _harvest_one_journal(key: str, year: int, args: argparse.Namespace) -> dict[str, Any]:
     """Harvest one journal-year and write it to the corpus.
 
-    The write path is the same one the ad-hoc runner used: the OpenAlex
-    provider for the records, the shared abstract backfill for the missing
-    ones, and a sync_jobs row for the outcome.
+    The source is chosen by what the journal is available from:
+
+    * a journal only Europe PMC indexes (PLOS ONE, eLife, Cell Reports,
+      PNAS, ...) comes from Europe PMC -- OpenAlex has no source id for it;
+    * a journal both index is taken from OpenAlex, and Europe PMC then fills
+      its abstracts in one batch instead of one request per paper.
+
+    Either way the rows are written through the same write path, so the
+    corpus does not care which service produced a record.
     """
+    from .journals_sync import import_epmc_journal_year, import_journal_year
+    from .provider_epmc import EPMC_JOURNALS, EPMC_ONLY_JOURNALS
     from .provider_journals import JOURNAL_SOURCES
 
-    from .journals_sync import import_journal_year
-
-    source_id, journal_name = JOURNAL_SOURCES[key]
     started = time.time()
-    result = import_journal_year(
-        key, year,
-        limit=getattr(args, "limit", None),
-        backfill=not getattr(args, "no_backfill", False),
-        mailto=getattr(args, "mailto", None),
-        api_key=getattr(args, "api_key", None),
-        since=getattr(args, "since", None),
-        incremental=bool(getattr(args, "incremental", False)),
-    )
+    if key in EPMC_ONLY_JOURNALS and key not in JOURNAL_SOURCES:
+        result = import_epmc_journal_year(
+            key, year, limit=getattr(args, "limit", None),
+            mailto=getattr(args, "mailto", None))
+        result["source"] = "europepmc"
+    else:
+        result = import_journal_year(
+            key, year,
+            limit=getattr(args, "limit", None),
+            backfill=not getattr(args, "no_backfill", False),
+            mailto=getattr(args, "mailto", None),
+            api_key=getattr(args, "api_key", None),
+            since=getattr(args, "since", None),
+            incremental=bool(getattr(args, "incremental", False)),
+        )
+        result["source"] = "openalex"
     result["seconds"] = round(time.time() - started, 1)
-    result["source_id"] = source_id
-    result["journal_name"] = journal_name
+    if key in EPMC_JOURNALS:
+        result["epmc_title"] = EPMC_JOURNALS[key][0]
     return result
 
 
 def _cmd_journal_abstracts(args: argparse.Namespace) -> dict[str, Any]:
     from .journal_abstracts import backfill_journal_abstracts
+    from .provider_epmc import EPMC_JOURNALS
     from .provider_journals import JOURNAL_YEARS
 
     years = [args.year] if args.year else list(JOURNAL_YEARS)
     results = []
     for key in _journal_keys(args.venue):
+        if key not in EPMC_JOURNALS:
+            # Only Europe PMC can serve an abstract for these rows, so a
+            # venue it does not index has nothing to backfill.
+            results.append({"venue": key, "year": args.year, "skipped": "not indexed by Europe PMC"})
+            continue
         for year in years:
             results.append(backfill_journal_abstracts(
                 key, year, limit=args.limit,

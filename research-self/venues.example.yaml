@@ -91,6 +91,60 @@ venues:
     provider: journal_openalex
     type: journal
     years: [2022, 2023, 2024, 2025, 2026]
+  # Journals only Europe PMC indexes (see paper_ingest/provider_epmc.py).
+  # OpenAlex has no source id for these, so they are harvested from the EBI's
+  # Europe PMC service instead -- which also serves their abstracts in full.
+  # Harvest with: python -m paper_ingest journals --venue <key> --year <year>
+  bmj:
+    name: BMJ
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  jama:
+    name: JAMA
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  plosone:
+    name: PLOS ONE
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  plomed:
+    name: PLOS Medicine
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  elife:
+    name: eLife
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  cellrep:
+    name: Cell Reports
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  natmed:
+    name: Nature Medicine
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  scirobot:
+    name: Science Robotics
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  nejm:
+    name: New England Journal of Medicine
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
+  pnas:
+    name: Proceedings of the National Academy of Sciences
+    provider: journal_europepmc
+    type: journal
+    years: [2022, 2023, 2024, 2025, 2026]
 
 # Expected corpus sizes per venue-year.
 #

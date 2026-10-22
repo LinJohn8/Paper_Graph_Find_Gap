@@ -52,7 +52,8 @@ import httpx
 from . import db
 from . import crawl
 
-__all__ = ["backfill_journal_abstracts", "fetch_landing_abstract"]
+__all__ = ["backfill_journal_abstracts", "fetch_landing_abstract",
+           "build_epmc_index", "EpmcIndex"]
 
 LOGGER = logging.getLogger("paper_ingest.journal_abstracts")
 
@@ -251,9 +252,116 @@ def _backfillable(paper_url: str) -> bool:
     return False
 
 
+class EpmcIndex:
+    """The abstracts Europe PMC holds for one journal-year, in memory.
+
+    Built by :func:`build_epmc_index`. The point is the request count: asking
+    Europe PMC for one DOI at a time costs a request per paper, while asking
+    it for the whole journal-year costs one request per thousand papers. For
+    a venue-year with 2,400 pending abstracts that is 2,400 requests down to
+    three.
+
+    Two keys are kept, because a paper in the corpus may be identified by
+    either: the DOI (lower-cased, as DOIs are case-insensitive) and the
+    Europe PMC pmid.
+    """
+
+    def __init__(self) -> None:
+        self.by_doi: dict[str, str] = {}
+        self.by_pmid: dict[str, str] = {}
+        self.records = 0
+
+    def __len__(self) -> int:
+        return self.records
+
+    def get(self, *, doi: str | None = None, pmid: str | None = None) -> str | None:
+        """The abstract for a paper, by DOI or by pmid."""
+        if doi:
+            hit = self.by_doi.get(doi.strip().lower())
+            if hit:
+                return hit
+        if pmid:
+            return self.by_pmid.get(pmid.strip())
+        return None
+
+
+def build_epmc_index(venue: str, year: int, *, client: httpx.Client | None = None,
+                     has_abstract_only: bool = True,
+                     sleep_s: float = 0.2) -> EpmcIndex:
+    """Fetch every abstract Europe PMC holds for one journal-year.
+
+    ``venue`` is the *registry* key of the journal (the same key the corpus
+    uses), not the Europe PMC journal title: the mapping lives in
+    :data:`paper_ingest.provider_epmc.EPMC_JOURNALS`, and a venue Europe PMC
+    does not index simply yields an empty index -- the caller then falls back
+    to the per-DOI lookup.
+
+    ``has_abstract_only`` asks the service for the records that have an
+    abstract at all. Measured on 2024: BMJ 1,178 -> 132, JAMA 947 -> 202,
+    PLOS ONE 16,688 -> 16,617, Cell Reports 1,376 -> 1,374, IEEE TPAMI
+    753 -> 753. The filter costs nothing where the abstracts are there and
+    removes a large tail of editorial matter where they are not.
+    """
+    from .provider_epmc import EPMC_JOURNALS, EpmcProvider, epmc_query
+
+    index = EpmcIndex()
+    if venue not in EPMC_JOURNALS:
+        return index
+    journal = EPMC_JOURNALS[venue][0]
+    provider = EpmcProvider(venue, client=client, sleep=sleep_s)
+    try:
+        query = epmc_query(journal, year)
+        if has_abstract_only:
+            query += " AND HAS_ABSTRACT:Y"
+        cursor = "*"
+        params = {
+            "query": query,
+            "format": "json",
+            "resultType": "core",
+            "pageSize": 1000,
+            "cursorMark": cursor,
+        }
+        while True:
+            params["cursorMark"] = cursor
+            payload = provider._get(params)
+            results = payload.get("resultList", {}).get("result", []) or []
+            if not results:
+                break
+            for record in results:
+                abstract = record.get("abstractText")
+                if not isinstance(abstract, str) or not abstract.strip():
+                    continue
+                from .provider_epmc import _clean_abstract
+
+                text = _clean_abstract(abstract)
+                if not text:
+                    continue
+                index.records += 1
+                doi = (record.get("doi") or "").strip().lower()
+                if doi:
+                    index.by_doi.setdefault(doi, text)
+                pmid = str(record.get("pmid") or "").strip()
+                if pmid:
+                    index.by_pmid.setdefault(pmid, text)
+            if len(results) < 1000:
+                break
+            next_cursor = payload.get("nextCursorMark")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+            if sleep_s:
+                time.sleep(sleep_s)
+    finally:
+        provider.close()
+    LOGGER.info("[journal_abstracts] %s %s: Europe PMC index holds %d abstracts",
+                venue, year, index.records)
+    return index
+
+
 def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = None,
                                sleep_s: float = 0.8, workers: int = 2,
-                               epmc_workers: int = 8, epmc_sleep_s: float = 0.05) -> dict[str, Any]:
+                               epmc_workers: int = 8, epmc_sleep_s: float = 0.05,
+                               use_epmc_index: bool = True) -> dict[str, Any]:
     """Fill empty abstracts of one journal-year from publisher landing pages.
 
     Only rows whose ``paper_url`` resolves to the publisher (OpenAlex sets it
@@ -321,7 +429,30 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
         if not fast:
             slow = slow[:limit]
 
+    # The batch index: one request per thousand papers instead of one request
+    # per paper. It is built before the lanes start, because both of them can
+    # use it (the slow lane's papers are the ones Europe PMC does not index
+    # by journal -- for those the index simply has no entry and the per-DOI
+    # lookup still runs).
+    epmc_index: EpmcIndex | None = None
+    if use_epmc_index and fast:
+        try:
+            epmc_index = build_epmc_index(venue, year)
+        except Exception as exc:  # noqa: BLE001 - the index is an optimisation
+            LOGGER.info("[journal_abstracts] %s %s: Europe PMC batch index failed (%s); "
+                        "falling back to per-DOI lookups", venue, year, exc)
+            epmc_index = None
+        stats["epmc_index_size"] = len(epmc_index) if epmc_index is not None else 0
+
     def _fetch_epmc(row: sqlite3.Row) -> tuple[str | None, str]:
+        # The batch index answers first: it holds the abstracts of every
+        # paper Europe PMC has for this journal-year, so a paper it knows
+        # costs no request at all. Only a paper it does not have falls
+        # through to the per-DOI lookup below.
+        if epmc_index is not None:
+            hit = epmc_index.get(doi=doi_of(row["paper_url"]))
+            if hit:
+                return hit, "europepmc"
         client = httpx.Client(
             timeout=45, follow_redirects=True,
             headers={"User-Agent": "PaperGraph/0.2 (academic metadata; mailto:research@example.org)"},

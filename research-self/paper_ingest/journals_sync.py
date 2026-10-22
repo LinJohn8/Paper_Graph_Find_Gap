@@ -34,7 +34,7 @@ from . import db
 from .journal_abstracts import backfill_journal_abstracts
 from .provider_journals import JOURNAL_SOURCES, JournalProvider
 
-__all__ = ["import_journal_year", "normalize_title_key"]
+__all__ = ["import_journal_year", "import_epmc_journal_year", "normalize_title_key"]
 
 #: How many papers are written before the transaction is committed. A journal
 #: year is a few thousand rows; committing in batches keeps the write lock
@@ -200,6 +200,111 @@ def import_journal_year(
         if counts["status"] == "success":
             # The watermark advances only after a successful run: a failed
             # harvest must not claim to have caught up.
+            _write_watermark(con, venue_key, year, db.now())
+        con.execute(
+            "UPDATE sync_jobs SET status=?,finished_at=?,fetched_count=?,inserted_count=?,"
+            "updated_count=?,skipped_count=?,error_count=?,error_message=? WHERE id=?",
+            (counts["status"], db.now(), counts["fetched"], counts["inserted"],
+             counts["updated"], counts["unchanged"], 0 if counts["status"] == "success" else 1,
+             counts["error"], job_id),
+        )
+        con.commit()
+    return counts
+
+
+def import_epmc_journal_year(
+    venue_key: str,
+    year: int,
+    *,
+    limit: int | None = None,
+    has_abstract_only: bool = True,
+    mailto: str | None = None,
+) -> dict[str, Any]:
+    """Harvest one journal-year from Europe PMC and write it into the corpus.
+
+    This is the path for the journals Europe PMC covers and OpenAlex never
+    indexed at all (PLOS ONE, eLife, Cell Reports, PNAS, NEJM, ...), and the
+    path that keeps working when the OpenAlex daily budget is spent.
+
+    Unlike the OpenAlex path, no separate backfill pass is needed: Europe
+    PMC serves the abstract with the record, so the rows arrive complete.
+    """
+    from .provider_epmc import EPMC_JOURNALS, EpmcProvider
+
+    if venue_key not in EPMC_JOURNALS:
+        raise ValueError(
+            f"unknown journal {venue_key!r}; known: {', '.join(sorted(EPMC_JOURNALS))}")
+    journal_title, journal_name = EPMC_JOURNALS[venue_key]
+
+    started = time.time()
+    counts: dict[str, Any] = {
+        "venue": venue_key, "year": year, "status": "success",
+        "fetched": 0, "inserted": 0, "updated": 0, "unchanged": 0,
+        "no_abstract": 0, "recovered": 0, "error": None,
+    }
+    provider = EpmcProvider(venue_key, mailto=mailto)
+    job_id = None
+    with db.connect() as con:
+        job_id = con.execute(
+            "INSERT INTO sync_jobs(venue,year,provider,status,started_at) VALUES(?,?,?,?,?)",
+            (venue_key, year, "journal_europepmc", "running", db.now()),
+        ).lastrowid
+        db.put_venue(
+            con, venue_id=venue_key, name=journal_name, year=year,
+            provider="journal_europepmc", source_venue_id=f"europepmc:{journal_title}",
+            kind="journal", source_url="https://europepmc.org",
+            availability="available",
+        )
+        con.commit()
+
+    try:
+        with db.connect() as con:
+            existing: dict[str, str] = {}
+            for row in con.execute(
+                "SELECT p.id, p.title FROM papers p JOIN paper_venues pv ON pv.paper_id=p.id "
+                "WHERE pv.venue_id=? AND pv.year=?", (venue_key, year),
+            ):
+                key = normalize_title_key(row["title"])
+                if len(key) >= 20 and key not in existing:
+                    existing[key] = row["id"]
+            stored_abstract: dict[str, str | None] = {}
+            for row in con.execute(
+                "SELECT p.id, p.abstract FROM papers p JOIN paper_venues pv ON pv.paper_id=p.id "
+                "WHERE pv.venue_id=? AND pv.year=?", (venue_key, year),
+            ):
+                stored_abstract[row["id"]] = row["abstract"]
+            con.commit()
+
+            for position, paper in enumerate(provider.iter_year(year, limit=limit)):
+                counts["fetched"] += 1
+                if not paper.get("abstract"):
+                    counts["no_abstract"] += 1
+                title_key = normalize_title_key(paper.get("title"))
+                reuse = existing.get(title_key) if len(title_key) >= 20 else None
+                if reuse:
+                    paper["id"] = reuse
+                if paper["id"] in stored_abstract and \
+                        stored_abstract[paper["id"]] == (paper.get("abstract") or None):
+                    counts["unchanged"] += 1
+                    continue
+                before = con.execute(
+                    "SELECT id FROM papers WHERE id=?", (paper["id"],)).fetchone()
+                db.upsert_paper(con, paper, venue_key, year, relation_type="publication")
+                counts["updated" if before else "inserted"] += 1
+                if len(title_key) >= 20 and title_key not in existing:
+                    existing[title_key] = paper["id"]
+                if position % COMMIT_BATCH == COMMIT_BATCH - 1:
+                    con.commit()
+            con.commit()
+    except Exception as exc:  # noqa: BLE001 - recorded on the job row
+        counts["status"] = "failed"
+        counts["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        provider.close()
+
+    counts["seconds"] = round(time.time() - started, 1)
+    with db.connect() as con:
+        if counts["status"] == "success":
             _write_watermark(con, venue_key, year, db.now())
         con.execute(
             "UPDATE sync_jobs SET status=?,finished_at=?,fetched_count=?,inserted_count=?,"
