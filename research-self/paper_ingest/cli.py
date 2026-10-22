@@ -115,6 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
     journals.add_argument("--limit", type=int, default=None)
     journals.add_argument("--no-backfill", action="store_true",
                           help="skip the abstract backfill pass")
+    journals.add_argument("--with-abstractless", action="store_true",
+                          help="also collect the records Europe PMC holds without an "
+                               "abstract (news, letters, editorials)")
     journals.add_argument("--since", default=None,
                           help="only fetch works OpenAlex indexed after this date (YYYY-MM-DD)")
     journals.add_argument("--incremental", action="store_true",
@@ -155,6 +158,14 @@ def build_parser() -> argparse.ArgumentParser:
     enrich.add_argument("--venue", required=True)
     enrich.add_argument("--year", type=int, default=2027)
     enrich.add_argument("--limit", type=int, default=100)
+
+    # -- data hygiene -------------------------------------------------------
+    prune = sub.add_parser(
+        "prune-abstractless",
+        help="remove the records of one source that carry no abstract")
+    prune.add_argument("--source", default="europepmc")
+    prune.add_argument("--dry-run", action="store_true",
+                       help="report what would be removed, change nothing")
 
     # -- the plan ------------------------------------------------------------
     plan = sub.add_parser(
@@ -292,6 +303,7 @@ def _harvest_one_journal(key: str, year: int, args: argparse.Namespace) -> dict[
     if key in EPMC_ONLY_JOURNALS and key not in JOURNAL_SOURCES:
         result = import_epmc_journal_year(
             key, year, limit=getattr(args, "limit", None),
+            has_abstract_only=not getattr(args, "with_abstractless", False),
             mailto=getattr(args, "mailto", None))
         result["source"] = "europepmc"
     else:
@@ -307,7 +319,7 @@ def _harvest_one_journal(key: str, year: int, args: argparse.Namespace) -> dict[
         result["source"] = "openalex"
     result["seconds"] = round(time.time() - started, 1)
     if key in EPMC_JOURNALS:
-        result["epmc_title"] = EPMC_JOURNALS[key][0]
+        result["epmc_titles"] = list(EPMC_JOURNALS[key][0])
     return result
 
 
@@ -371,6 +383,12 @@ def _cmd_enrich_abstracts(args: argparse.Namespace) -> dict[str, Any]:
     return enrich_missing_abstracts(args.venue, args.year, args.limit)
 
 
+def _cmd_prune_abstractless(args: argparse.Namespace) -> dict[str, Any]:
+    from .journals_sync import prune_abstractless
+
+    return prune_abstractless(source=args.source, dry_run=args.dry_run)
+
+
 def _cmd_harvest(args: argparse.Namespace) -> dict[str, Any]:
     """The plan: journals, then the abstract backfill, then the audit.
 
@@ -414,6 +432,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace], Any]] = {
     "graph": _cmd_graph,
     "build-graph": _cmd_build_graph,
     "enrich-abstracts": _cmd_enrich_abstracts,
+    "prune-abstractless": _cmd_prune_abstractless,
     "harvest": _cmd_harvest,
 }
 

@@ -307,10 +307,13 @@ def build_epmc_index(venue: str, year: int, *, client: httpx.Client | None = Non
     index = EpmcIndex()
     if venue not in EPMC_JOURNALS:
         return index
-    journal = EPMC_JOURNALS[venue][0]
+    # The whole family of MEDLINE titles, not just the flagship: Europe PMC
+    # indexes The Lancet's specials separately from The Lancet, and the
+    # corpus's Lancet papers live mostly in the specials.
+    journals = EPMC_JOURNALS[venue][0]
     provider = EpmcProvider(venue, client=client, sleep=sleep_s)
     try:
-        query = epmc_query(journal, year)
+        query = epmc_query(journals, year)
         if has_abstract_only:
             query += " AND HAS_ABSTRACT:Y"
         cursor = "*"
@@ -444,7 +447,13 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
             epmc_index = None
         stats["epmc_index_size"] = len(epmc_index) if epmc_index is not None else 0
 
-    def _fetch_epmc(row: sqlite3.Row) -> tuple[str | None, str]:
+    def _fetch_epmc(row: sqlite3.Row) -> tuple[str | None, str, bool]:
+        """The abstract for one paper, and whether the *service* failed.
+
+        The third element is what the circuit breaker counts: a paper Europe
+        PMC does not have is a legitimate answer, a refused or errored request
+        is not.
+        """
         # The batch index answers first: it holds the abstracts of every
         # paper Europe PMC has for this journal-year, so a paper it knows
         # costs no request at all. Only a paper it does not have falls
@@ -452,20 +461,26 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
         if epmc_index is not None:
             hit = epmc_index.get(doi=doi_of(row["paper_url"]))
             if hit:
-                return hit, "europepmc"
+                return hit, "europepmc", False
+            # The index is authoritative for this journal-year: Europe PMC
+            # does not have this paper, so a per-DOI request would only
+            # confirm it. Asking anyway costs one request per missing paper.
+            return None, "none", False
         client = httpx.Client(
             timeout=45, follow_redirects=True,
             headers={"User-Agent": "PaperGraph/0.2 (academic metadata; mailto:research@example.org)"},
         )
         try:
             abstract = fetch_europepmc_abstract(client, doi_of(row["paper_url"]) or "")
-            return abstract, ("europepmc" if abstract else "none")
+            return abstract, ("europepmc" if abstract else "none"), False
+        except Exception:  # noqa: BLE001 - the service failed, not the paper
+            return None, "none", True
         finally:
             client.close()
             if epmc_sleep_s:
                 time.sleep(epmc_sleep_s)
 
-    def _fetch_page(row: sqlite3.Row) -> tuple[str | None, str]:
+    def _fetch_page(row: sqlite3.Row) -> tuple[str | None, str, bool]:
         client = httpx.Client(
             timeout=45, follow_redirects=True,
             headers={"User-Agent": "PaperGraph/0.2 (academic metadata; mailto:research@example.org)"},
@@ -474,12 +489,14 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
             for attempt in range(3):
                 try:
                     abstract = fetch_landing_abstract(client, row["paper_url"])
-                    return abstract, ("landing_page" if abstract else "none")
+                    return abstract, ("landing_page" if abstract else "none"), False
                 except _ChallengePage:
+                    # The publisher answered with a bot-challenge page: the
+                    # service is refusing us, which is what the breaker is for.
                     if attempt == 2:
-                        return None, "none"
+                        return None, "none", True
                     time.sleep(2.0 * (attempt + 1) + random.random())
-            return None, "none"
+            return None, "none", False
         finally:
             client.close()
             if sleep_s:
@@ -502,8 +519,21 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
             reset the counter and the lane would grind through the batch at
             ~1 paper per 10 seconds, recovering nothing.
 
-            The breaker itself is :class:`paper_ingest.crawl.CircuitBreaker`,
-            the one the rest of the collector shares.
+            WHAT COUNTS AS A MISS
+            ----------------------
+            The breaker measures whether the *service* is still answering, not
+            whether every paper has an abstract. Those are different questions,
+            and conflating them stopped the backfill short: the batch index
+            covers 12% of The Lancet's 2022 papers (measured: 158 of 1,270),
+            so a "did we get an abstract" hit rate of 12% fell below the 25%
+            threshold and the lane gave up after 50 papers, having recovered 3
+            instead of 158. A paper Europe PMC simply does not have is not a
+            failure; a request that errors or is refused is.
+
+            So the worker reports whether the *service* failed, and only that
+            counts against the breaker. The breaker itself is
+            :class:`paper_ingest.crawl.CircuitBreaker`, the one the rest of
+            the collector shares.
             """
             if not batch:
                 return 0
@@ -515,10 +545,11 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
                 for position, future in enumerate(as_completed(futures)):
                     row = futures[future]
                     attempted += 1
+                    service_failed = False
                     try:
-                        abstract, source = future.result()
+                        abstract, source, service_failed = future.result()
                     except Exception:  # noqa: BLE001 - one bad page must not stop the batch
-                        abstract, source = None, "none"
+                        abstract, source, service_failed = None, "none", True
                     if abstract:
                         hits += 1
                         con.execute(
@@ -542,7 +573,7 @@ def backfill_journal_abstracts(venue: str, year: int, *, limit: int | None = Non
                         # invisible to any other reader until it finished, and a
                         # crash would lose the whole batch.
                         con.commit()
-                    if breaker is not None and breaker.record(bool(abstract)):
+                    if breaker is not None and breaker.record(not service_failed):
                         stats["lane_gave_up"] = stats.get("lane_gave_up", 0) + 1
                         stats["lane_attempted"] = stats.get("lane_attempted", 0) + attempted
                         LOGGER.info(

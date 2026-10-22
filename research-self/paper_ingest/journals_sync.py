@@ -34,7 +34,8 @@ from . import db
 from .journal_abstracts import backfill_journal_abstracts
 from .provider_journals import JOURNAL_SOURCES, JournalProvider
 
-__all__ = ["import_journal_year", "import_epmc_journal_year", "normalize_title_key"]
+__all__ = ["import_journal_year", "import_epmc_journal_year", "normalize_title_key",
+           "prune_abstractless"]
 
 #: How many papers are written before the transaction is committed. A journal
 #: year is a few thousand rows; committing in batches keeps the write lock
@@ -212,6 +213,128 @@ def import_journal_year(
     return counts
 
 
+def prune_abstractless(*, source: str = "europepmc", dry_run: bool = False) -> dict[str, Any]:
+    """Remove the records of one source that carry no abstract.
+
+    WHY THIS EXISTS
+    ----------------
+    The Europe PMC collector now asks the service only for the records that
+    have an abstract (``HAS_ABSTRACT:Y``), because the rest is editorial
+    matter -- news items, letters, obituaries -- that carries a title and a
+    DOI and nothing else. The first full run predated that filter, so it
+    left behind a tail of abstract-less records: BMJ 2022 arrived with 2,003
+    rows of which 189 had an abstract.
+
+    Such a row is nearly inert here. The semantic model is fitted on
+    ``title * 3 + keywords * 2 + abstract``
+    (:func:`paper_ingest.semantics.make_doc`), so an abstract-less record
+    contributes a title and nothing else; it lands in a cluster defined by
+    its title words alone and drags that cluster's centroid. The idea finder
+    reads abstracts and cannot use it at all.
+
+    Only rows whose *source* matches are touched, so a record another
+    collector delivered is never removed on the strength of a rule about
+    this one. The record is removed *as a record*: a source's abstract-less
+    paper has no value in any venue it appears in, so every link to it goes
+    with it.
+
+    The FTS mirror is maintained too -- ``papers_fts`` is keyed by
+    ``papers.rowid``, so the row is deleted by that rowid.
+
+    HOW IT IS DONE
+    --------------
+    As one set-based transaction, not row by row. Two measurements shaped it:
+
+    * The row-by-row version asked ``SELECT count(*) FROM paper_venues WHERE
+      paper_id=?`` for every candidate, and ``paper_venues`` has no index on
+      ``paper_id`` -- so each question was a full scan of a 325,000-row
+      table. Measured: 220 rows per minute, which is 90 minutes for 19,712
+      rows.
+    * Deleting the FTS rows one by one is just as slow: FTS5 merges a
+      segment per delete, and 15,312 of them were still running after ten
+      minutes.
+
+    So the prune answers the question once, in the database, and rebuilds the
+    FTS mirror in one pass -- the same rebuild ``db._align_fts_rowids``
+    performs.
+    """
+    db.init_db()
+    with db.connect() as con:
+        rows = con.execute(
+            "SELECT p.id, p.rowid FROM papers p WHERE p.source=? "
+            "AND (p.abstract IS NULL OR trim(p.abstract)='')", (source,)).fetchall()
+        total = len(rows)
+        if dry_run:
+            per_venue = {
+                r["venue_id"]: r["n"] for r in con.execute(
+                    "SELECT pv.venue_id, count(*) n FROM paper_venues pv "
+                    "JOIN papers p ON p.id=pv.paper_id WHERE p.source=? "
+                    "AND (p.abstract IS NULL OR trim(p.abstract)='') GROUP BY 1",
+                    (source,))
+            }
+            return {"source": source, "would_remove": total, "by_venue": per_venue,
+                    "dry_run": True}
+
+        # One transaction: the FTS mirror and the papers table must not drift
+        # apart, and a half-applied prune would be worse than none.
+        #
+        # ``isolation_level = None`` hands the transaction control to SQLite.
+        # The default (implicit transactions) would refuse ``BEGIN IMMEDIATE``
+        # with "cannot start a transaction within a transaction".
+        previous_isolation = con.isolation_level
+        con.isolation_level = None
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("CREATE TEMP TABLE IF NOT EXISTS doomed_papers "
+                        "(id TEXT PRIMARY KEY, rowid_ INTEGER)")
+            con.execute("DELETE FROM doomed_papers")
+            con.executemany(
+                "INSERT OR IGNORE INTO doomed_papers(id,rowid_) VALUES(?,?)",
+                [(r["id"], r["rowid"]) for r in rows])
+
+            # The paper row goes first. ``paper_venues`` has ON DELETE CASCADE
+            # from ``papers``, so the links follow on their own -- and the
+            # cascade needs an index on ``paper_relations.target_paper_id``,
+            # which is why that index exists (see db.init_db).
+            removed_papers = con.execute(
+                "DELETE FROM papers WHERE id IN (SELECT id FROM doomed_papers)"
+            ).rowcount
+            removed_links = con.execute(
+                "DELETE FROM paper_venues WHERE paper_id IN "
+                "(SELECT id FROM doomed_papers)").rowcount
+
+            # The FTS mirror is rebuilt rather than patched row by row.
+            #
+            # Deleting N rows from an FTS5 table is not N cheap statements:
+            # every delete merges a segment, and 15,312 of them took over ten
+            # minutes and were still running. Dropping the table's contents
+            # and refilling it from ``papers`` is one pass over the corpus
+            # (the same rebuild ``db._align_fts_rowids`` performs, and the
+            # same one the index was migrated with), and it cannot leave the
+            # mirror out of step with the papers it mirrors.
+            con.execute("DELETE FROM papers_fts")
+            con.execute(
+                """INSERT INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue)
+                   SELECT p.rowid,p.id,p.title,coalesce(p.abstract,''),p.authors_json,
+                          p.keywords_json,
+                          coalesce((SELECT v.name FROM paper_venues pv
+                                    JOIN venues v ON v.id=pv.venue_id AND v.year=pv.year
+                                    WHERE pv.paper_id=p.id LIMIT 1),'')
+                   FROM papers p"""
+            )
+            removed_fts = len(rows)
+            con.execute("DROP TABLE doomed_papers")
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+        finally:
+            con.isolation_level = previous_isolation
+    return {"source": source, "removed_papers": removed_papers,
+            "removed_links": removed_links, "removed_fts": removed_fts,
+            "dry_run": False}
+
+
 def import_epmc_journal_year(
     venue_key: str,
     year: int,
@@ -228,13 +351,24 @@ def import_epmc_journal_year(
 
     Unlike the OpenAlex path, no separate backfill pass is needed: Europe
     PMC serves the abstract with the record, so the rows arrive complete.
+
+    ``has_abstract_only`` asks the service for the records that carry an
+    abstract. It is on by default, and the reason is measured: BMJ 2024 has
+    1,178 records of which only 132 have an abstract, JAMA 947 of which 202
+    do. The rest is editorial matter -- news items, letters, obituaries --
+    that carries a title and a DOI and nothing else. Such a record is nearly
+    useless here: the semantic model is fitted on title *and* abstract, the
+    idea finder reads abstracts, and a cluster of news items is noise on the
+    map. Where Europe PMC indexes a journal well the filter costs nothing
+    (PLOS ONE 16,688 -> 16,617, Cell Reports 1,376 -> 1,374, IEEE TPAMI
+    753 -> 753).
     """
     from .provider_epmc import EPMC_JOURNALS, EpmcProvider
 
     if venue_key not in EPMC_JOURNALS:
         raise ValueError(
             f"unknown journal {venue_key!r}; known: {', '.join(sorted(EPMC_JOURNALS))}")
-    journal_title, journal_name = EPMC_JOURNALS[venue_key]
+    journals, journal_name = EPMC_JOURNALS[venue_key]
 
     started = time.time()
     counts: dict[str, Any] = {
@@ -251,7 +385,7 @@ def import_epmc_journal_year(
         ).lastrowid
         db.put_venue(
             con, venue_id=venue_key, name=journal_name, year=year,
-            provider="journal_europepmc", source_venue_id=f"europepmc:{journal_title}",
+            provider="journal_europepmc", source_venue_id=f"europepmc:{journals[0]}",
             kind="journal", source_url="https://europepmc.org",
             availability="available",
         )
@@ -275,7 +409,8 @@ def import_epmc_journal_year(
                 stored_abstract[row["id"]] = row["abstract"]
             con.commit()
 
-            for position, paper in enumerate(provider.iter_year(year, limit=limit)):
+            for position, paper in enumerate(provider.iter_year(
+                    year, limit=limit, has_abstract_only=has_abstract_only)):
                 counts["fetched"] += 1
                 if not paper.get("abstract"):
                     counts["no_abstract"] += 1

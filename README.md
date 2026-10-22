@@ -241,6 +241,41 @@ were closed:
   result not ready) for minutes at a time and then `429` — even at two seconds
   apart — so it is not usable as a supplementary source. OpenAlex already
   indexes the same venues.
+- **Europe PMC is a second journal collector.** The OpenAlex budget is
+  per-IP and small; it ran out twice during this work and stalled the
+  collection on a `429`. Europe PMC (the EBI's public service) needs no key,
+  serves the full abstract of every record it holds, pages with a cursor (no
+  10,000-record ceiling), and indexes ten journals the corpus did not have:
+  PLOS ONE, PNAS, eLife, Cell Reports, Nature Medicine, Science Robotics,
+  NEJM, JAMA, BMJ and PLOS Medicine. It also covers IEEE TPAMI and Nature
+  Machine Intelligence — the machine-learning venues the corpus was weakest on
+  — with abstracts in full, where OpenAlex withheld them. A verified
+  end-to-end run: Cell Reports 2024 brought 1,376 records with 1,374
+  abstracts in 13.9 s, a journal OpenAlex has no source id for.
+- **The abstract backfill asks in batches.** It used to look up one DOI at a
+  time, so a venue-year with 2,400 pending abstracts cost 2,400 requests. It
+  now asks Europe PMC for the whole journal-year — one request per thousand
+  papers — and falls back to the per-DOI lookup only for what the batch
+  missed. Where Europe PMC indexes a journal well (JACS, PNAS, Nature
+  Communications, PLOS ONE) it is three requests instead of three thousand.
+- **A journal is a family, not a title.** OpenAlex treats a publisher's
+  titles as one source — "The Lancet" covers the flagship *and* its specials
+  — while Europe PMC indexes every MEDLINE title separately, and the
+  wildcard `JOURNAL:"Lancet*"` is not supported (measured: 0 hits for every
+  family tried). Asking for the flagship alone therefore found almost
+  nothing: The Lancet's backfill recovered 4 papers, because the corpus's
+  1,373 Lancet papers include 1,269 that Europe PMC files under the specials.
+  The registry now lists the family and the query ORs the titles together:
+
+  | family | flagship only | whole family | difference |
+  |---|---|---|---|
+  | Nature | 1,280 | 15,297 | 12.0× |
+  | Cell | 533 | 3,843 | 7.2× |
+  | Lancet | 236 | 1,505 | 6.4× |
+  | JAMA | 202 | 3,314 | 16.4× |
+  | BMJ | 132 | 10,615 | 80.4× |
+
+  (2024, records with an abstract.)
 
 **Operational note**: OpenAlex meters requests per IP against a small shared
 daily budget when no API key is supplied; a harvest burst exhausts it and the

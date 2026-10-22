@@ -163,3 +163,39 @@ class TestPaging:
         }
         monkeypatch.setattr(provider, "_get", lambda params: page)
         assert len(provider.list_year(2024, limit=3)) == 3
+
+
+class TestAbstractFilter:
+    """The abstract filter decides what kind of corpus a journal becomes."""
+
+    def test_the_query_asks_for_the_records_with_an_abstract(self):
+        provider = EpmcProvider("bmj")
+        assert "HAS_ABSTRACT:Y" in provider._query(2024)
+
+    def test_the_filter_can_be_turned_off(self):
+        provider = EpmcProvider("bmj")
+        assert "HAS_ABSTRACT" not in provider._query(2024, has_abstract_only=False)
+
+    def test_the_filter_reaches_the_request(self, monkeypatch):
+        provider = EpmcProvider("bmj")
+        seen = {}
+
+        def fake_get(params):
+            seen.update(params)
+            return {"resultList": {"result": []}}
+
+        monkeypatch.setattr(provider, "_get", fake_get)
+        provider.list_year(2024)
+        assert "HAS_ABSTRACT:Y" in seen["query"]
+
+    def test_the_filter_is_off_when_asked_for(self, monkeypatch):
+        provider = EpmcProvider("bmj")
+        seen = {}
+
+        def fake_get(params):
+            seen.update(params)
+            return {"resultList": {"result": []}}
+
+        monkeypatch.setattr(provider, "_get", fake_get)
+        provider.list_year(2024, has_abstract_only=False)
+        assert "HAS_ABSTRACT" not in seen["query"]

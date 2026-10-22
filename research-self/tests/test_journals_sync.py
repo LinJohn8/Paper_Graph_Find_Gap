@@ -304,3 +304,104 @@ class TestIncremental:
         assert second["updated"] == 0
         with db.connect() as con:
             assert con.execute("SELECT count(*) FROM papers").fetchone()[0] == 1
+
+
+class TestPruneAbstractless:
+    """The prune removes one source's abstract-less records and nothing else."""
+
+    def _seed(self, con):
+        """Two EPMC rows (one with an abstract) and one OpenAlex row."""
+        con.execute(
+            "INSERT INTO papers(id,source,source_paper_id,title,abstract,authors_json,"
+            "keywords_json,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("epmc:1", "europepmc", "1", "A Paper Without An Abstract", None, "[]",
+             "[]", db.now(), db.now()))
+        con.execute(
+            "INSERT INTO papers(id,source,source_paper_id,title,abstract,authors_json,"
+            "keywords_json,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("epmc:2", "europepmc", "2", "A Paper With An Abstract", "The abstract.",
+             "[]", "[]", db.now(), db.now()))
+        con.execute(
+            "INSERT INTO papers(id,source,source_paper_id,title,abstract,authors_json,"
+            "keywords_json,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("openalex:W1", "openalex", "W1", "An OpenAlex Paper Without An Abstract",
+             None, "[]", "[]", db.now(), db.now()))
+        for venue, pid in (("bmj", "epmc:1"), ("bmj", "epmc:2"),
+                           ("nature", "openalex:W1")):
+            con.execute(
+                "INSERT OR IGNORE INTO venues(id,name,year,provider,source_venue_id,type,"
+                "source_url,availability_status) VALUES(?,?,?,?,?,?,?,?)",
+                (venue, venue.title(), 2024, "test", None, "journal", None, "available"))
+            con.execute(
+                "INSERT INTO paper_venues(paper_id,venue_id,relation_type,year) "
+                "VALUES(?,?,?,?)", (pid, venue, "publication", 2024))
+        # The FTS mirror, keyed by papers.rowid.
+        for pid in ("epmc:1", "epmc:2", "openalex:W1"):
+            rowid = con.execute("SELECT rowid FROM papers WHERE id=?", (pid,)).fetchone()[0]
+            con.execute(
+                "INSERT INTO papers_fts(rowid,paper_id,title,abstract,authors,keywords,venue) "
+                "VALUES(?,?,?,?,?,?,?)", (rowid, pid, "t", "", "", "", "v"))
+        con.commit()
+
+    def test_the_dry_run_changes_nothing(self, memory_db):
+        with db.connect() as con:
+            self._seed(con)
+        result = journals_sync.prune_abstractless(dry_run=True)
+        assert result["would_remove"] == 1
+        assert result["by_venue"] == {"bmj": 1}
+        with db.connect() as con:
+            assert con.execute("SELECT count(*) FROM papers").fetchone()[0] == 3
+
+    def test_only_the_named_source_is_pruned(self, memory_db):
+        with db.connect() as con:
+            self._seed(con)
+        result = journals_sync.prune_abstractless()
+        assert result["removed_papers"] == 1
+        with db.connect() as con:
+            left = {r["id"] for r in con.execute("SELECT id FROM papers")}
+            assert "epmc:1" not in left
+            assert "epmc:2" in left, "a record with an abstract must stay"
+            assert "openalex:W1" in left, "another source must not be touched"
+
+    def test_the_fts_mirror_is_pruned_too(self, memory_db):
+        with db.connect() as con:
+            self._seed(con)
+        journals_sync.prune_abstractless()
+        with db.connect() as con:
+            ids = {r["paper_id"] for r in con.execute("SELECT paper_id FROM papers_fts")}
+            assert "epmc:1" not in ids
+            assert "epmc:2" in ids
+
+    def test_the_venue_link_is_removed(self, memory_db):
+        with db.connect() as con:
+            self._seed(con)
+        journals_sync.prune_abstractless()
+        with db.connect() as con:
+            links = con.execute(
+                "SELECT count(*) FROM paper_venues WHERE paper_id='epmc:1'").fetchone()[0]
+            assert links == 0
+
+    def test_a_paper_another_venue_uses_keeps_its_row(self, memory_db):
+        with db.connect() as con:
+            self._seed(con)
+            # The same paper in a second venue. (paper_venues is unique per
+            # (paper, venue, relation), so the second reference has to be a
+            # different venue, not a different year.)
+            con.execute(
+                "INSERT OR IGNORE INTO venues(id,name,year,provider,source_venue_id,type,"
+                "source_url,availability_status) VALUES(?,?,?,?,?,?,?,?)",
+                ("jama", "JAMA", 2024, "test", None, "journal", None, "available"))
+            con.execute(
+                "INSERT INTO paper_venues(paper_id,venue_id,relation_type,year) "
+                "VALUES(?,?,?,?)", ("epmc:1", "jama", "publication", 2024))
+            con.commit()
+        journals_sync.prune_abstractless()
+        with db.connect() as con:
+            # The prune removes the *record*, not a link: an abstract-less
+            # record of this source has no value in any venue it appears in.
+            gone = con.execute(
+                "SELECT count(*) FROM papers WHERE id='epmc:1'").fetchone()[0]
+            assert gone == 0
+            links = con.execute(
+                "SELECT count(*) FROM paper_venues WHERE paper_id='epmc:1'").fetchone()[0]
+            assert links == 0

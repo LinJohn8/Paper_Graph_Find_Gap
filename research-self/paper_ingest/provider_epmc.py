@@ -60,78 +60,96 @@ PAGE_SIZE = 1000
 
 #: The journals Europe PMC serves, keyed by the registry key.
 #:
-#: The value is the Europe PMC journal title -- which is the *MEDLINE*
-#: abbreviation in most cases, because Europe PMC indexes the MEDLINE line
-#: ("N Engl J Med", "Proc Natl Acad Sci U S A", "IEEE Trans Pattern Anal
-#: Mach Intell"). The display name is what the corpus shows.
+#: The value is a *family*: the tuple of MEDLINE titles Europe PMC indexes
+#: under, and the display name the corpus shows. A family exists because
+#: OpenAlex treats a publisher's titles as one source while Europe PMC
+#: indexes each MEDLINE title separately -- and the wildcard
+#: ``JOURNAL:"Lancet*"`` is not supported (measured: 0 hits for every family
+#: tried), so the titles have to be listed.
 #:
 #: Every title below was measured against the live service on 2026-10-21 with
-#: a 2024 query; the count column is the number of records *with an
-#: abstract* (the ``HAS_ABSTRACT:Y`` filter), which is what a journal-year
-#: backfill actually needs:
+#: a 2024 query; the counts are the records *with an abstract*, which is what
+#: a journal-year backfill actually needs. The "family" column is what the
+#: whole family yields against the flagship alone:
 #:
-#:     key            Europe PMC title                     2024 w/ abstract
-#:     jacs           J Am Chem Soc                                  3,611
-#:     pnas           Proc Natl Acad Sci U S A                       3,372
-#:     prl            Phys Rev Lett                                  2,471
-#:     plosone        PLoS One                                      16,617
-#:     naturecomms    Nat Commun                                    10,307
-#:     elife          Elife                                          1,539
-#:     cellrep        Cell Rep                                       1,374
-#:     nature         Nature                                         1,280
-#:     science        Science                                        1,126
-#:     tpami          IEEE Trans Pattern Anal Mach Intell               753
-#:     cell           Cell                                             533
-#:     neuron         Neuron                                           302
-#:     natmed         Nat Med                                          328
-#:     nejm           N Engl J Med                                     228
-#:     lancet         Lancet                                           236
-#:     bmj            BMJ                                              132
-#:     jama           JAMA                                             202
-#:     scirobot       Sci Robot                                        132
-#:     plomed         PLoS Med                                         145
-#:     natureneuro    Nat Neurosci                                     206
-#:     naturemethods  Nat Methods                                      220
-#:     ieee_access    IEEE Access                                        29
-#:     naturemi       Nat Mach Intell                                   19
-#:     npjqi          npj Quantum Inf                                   13
-#:     ijcv           Int J Comput Vis                                    6
+#:     family      flagship      family      difference
+#:     Nature        1,280      15,297          12.0x
+#:     Cell            533       3,843           7.2x
+#:     Lancet          236       1,505           6.4x
+#:     JAMA            202       3,314          16.4x
+#:     BMJ             132      10,615          80.4x
 #:
-#: The last six are the titles Europe PMC barely indexes: it is a
-#: bibliographic service for the life sciences, so a computer-vision or
-#: quantum-information journal is nearly invisible to it. They are still
-#: listed, because the index then correctly holds nothing for them and the
-#: caller falls back to the per-DOI lookup.
-EPMC_JOURNALS: dict[str, tuple[str, str]] = {
+#: That difference is not decoration: without the specials, The Lancet's
+#: abstract coverage was 6% of its papers, because the corpus's 1,373 Lancet
+#: papers include 1,269 that Europe PMC files under the specials.
+#:
+#: Only titles that carry research articles are listed. Reviews
+#: (``Nat Rev *``) and case reports (``BMJ Case Rep``) are excluded on
+#: purpose: they are a different kind of document from the research paper
+#: this corpus is about.
+EPMC_JOURNALS: dict[str, tuple[tuple[str, ...], str]] = {
     # -- the journals the OpenAlex registry already covers -----------------
-    "nature": ("Nature", "Nature"),
-    "science": ("Science", "Science"),
-    "cell": ("Cell", "Cell"),
-    "neuron": ("Neuron", "Neuron"),
-    "prl": ("Phys Rev Lett", "Physical Review Letters"),
-    "jacs": ("J Am Chem Soc", "Journal of the American Chemical Society"),
-    "lancet": ("Lancet", "The Lancet"),
-    "naturecomms": ("Nat Commun", "Nature Communications"),
-    "naturemi": ("Nat Mach Intell", "Nature Machine Intelligence"),
-    "natureneuro": ("Nat Neurosci", "Nature Neuroscience"),
-    "naturemethods": ("Nat Methods", "Nature Methods"),
-    "npjqi": ("npj Quantum Inf", "npj Quantum Information"),
-    "tpami": ("IEEE Trans Pattern Anal Mach Intell",
+    "nature": (
+        ("Nature", "Nat Commun", "Nat Methods", "Nat Med", "Nat Neurosci",
+         "Nat Biotechnol", "Nat Genet", "Nat Chem", "Nat Phys", "Nat Mater",
+         "Nat Nanotechnol", "Nat Mach Intell", "Nat Comput Sci", "Nat Sustain",
+         "Nat Food", "Nat Cell Biol", "Nat Struct Mol Biol", "Nat Aging",
+         "Nat Hum Behav", "Nat Metab", "Nat Biomed Eng", "Nat Protoc",
+         "Nat Commun Biol"),
+        "Nature"),
+    "science": (
+        ("Science", "Sci Adv", "Sci Robot", "Sci Signal", "Sci Transl Med",
+         "Sci Data"),
+        "Science"),
+    "cell": (
+        ("Cell", "Cell Rep", "Cell Rep Med", "Cell Rep Methods", "Cell Stem Cell",
+         "Cell Metab", "Cell Host Microbe", "Cell Syst", "Cell Genom",
+         "Cell Chem Biol", "Cell Death Differ", "Cell Mech Biol",
+         "Cell Mol Biol", "Cell Tissue Res", "Cell Cycle", "Cell Transplant"),
+        "Cell"),
+    "neuron": (("Neuron", "Neuron (Cambridge)"), "Neuron"),
+    "prl": (("Phys Rev Lett", "Phys Rev Lett (Online)"), "Physical Review Letters"),
+    "jacs": (("J Am Chem Soc", "J Am Chem Soc (Online)"),
+             "Journal of the American Chemical Society"),
+    "lancet": (
+        ("Lancet", "Lancet Oncol", "Lancet Infect Dis", "Lancet Microbe",
+         "Lancet Public Health", "Lancet Digit Health", "Lancet Rheumatol",
+         "Lancet Neurol", "Lancet Gastroenterol Hepatol", "Lancet Healthy Longev",
+         "Lancet Haematol", "Lancet Psychiatry", "Lancet Diabetes Endocrinol",
+         "Lancet Respir Med", "Lancet Child Adolesc Health", "Lancet Reg Health"),
+        "The Lancet"),
+    "naturecomms": (("Nat Commun",), "Nature Communications"),
+    "naturemi": (("Nat Mach Intell",), "Nature Machine Intelligence"),
+    "natureneuro": (("Nat Neurosci",), "Nature Neuroscience"),
+    "naturemethods": (("Nat Methods",), "Nature Methods"),
+    "npjqi": (("npj Quantum Inf",), "npj Quantum Information"),
+    "tpami": (("IEEE Trans Pattern Anal Mach Intell",
+               "IEEE Trans Pattern Anal Mach Intell (Online)"),
               "IEEE Transactions on Pattern Analysis and Machine Intelligence"),
-    "ijcv": ("Int J Comput Vis", "International Journal of Computer Vision"),
+    "ijcv": (("Int J Comput Vis", "Int J Comput Vis (Online)"),
+             "International Journal of Computer Vision"),
     # -- journals the corpus did not have at all ---------------------------
-    "bmj": ("BMJ", "BMJ"),
-    "jama": ("JAMA", "JAMA"),
-    "plomed": ("PLoS Med", "PLOS Medicine"),
-    "plosone": ("PLoS One", "PLOS ONE"),
-    "elife": ("Elife", "eLife"),
-    "cellrep": ("Cell Rep", "Cell Reports"),
-    "natmed": ("Nat Med", "Nature Medicine"),
-    "scirobot": ("Sci Robot", "Science Robotics"),
-    "nejm": ("N Engl J Med", "New England Journal of Medicine"),
-    "pnas": ("Proc Natl Acad Sci U S A",
+    "bmj": (
+        ("BMJ", "BMJ Open", "BMJ Glob Health", "BMJ Public Health",
+         "BMJ Open Diabetes Res Care", "BMJ Open Sport Exerc Med",
+         "BMJ Open Resp Res", "BMJ Paediatr Open", "BMJ Open Res"),
+        "BMJ"),
+    "jama": (
+        ("JAMA", "JAMA Netw Open", "JAMA Intern Med", "JAMA Cardiol",
+         "JAMA Oncol", "JAMA Psychiatry", "JAMA Pediatr", "JAMA Dermatol",
+         "JAMA Ophthalmol", "JAMA Neurol", "JAMA Surg", "JAMA Health Forum"),
+        "JAMA"),
+    "plomed": (("PLoS Med",), "PLOS Medicine"),
+    "plosone": (("PLoS One",), "PLOS ONE"),
+    "elife": (("Elife",), "eLife"),
+    "cellrep": (("Cell Rep",), "Cell Reports"),
+    "natmed": (("Nat Med",), "Nature Medicine"),
+    "scirobot": (("Sci Robot",), "Science Robotics"),
+    "nejm": (("N Engl J Med", "N Engl J Med (Online)"),
+             "New England Journal of Medicine"),
+    "pnas": (("Proc Natl Acad Sci U S A", "Proc Natl Acad Sci U S A (Online)"),
              "Proceedings of the National Academy of Sciences"),
-    "ieee_access": ("IEEE Access", "IEEE Access"),
+    "ieee_access": (("IEEE Access", "IEEE Access (Online)"), "IEEE Access"),
 }
 
 #: The journals Europe PMC covers that the OpenAlex registry never listed.
@@ -156,7 +174,7 @@ __all__ = [
 ]
 
 
-def epmc_query(journal: str, year: int) -> str:
+def epmc_query(journal: str | tuple[str, ...], year: int) -> str:
     """The Europe PMC query for one journal-year.
 
     ``FIRST_PDATE`` is the journal's own first-publication date, which is the
@@ -164,9 +182,30 @@ def epmc_query(journal: str, year: int) -> str:
     in print in January 2024 belongs to the 2024 issue. ``PUB_TYPE:"journal
     article"`` keeps reviews, editorials and letters out of the count --
     without it, a year is inflated by material that is not a research paper.
+
+    ``journal`` may be a family (several MEDLINE titles) as well as a single
+    one. The family matters: OpenAlex treats a publisher's family as one
+    source -- "The Lancet" covers the flagship *and* its specials -- while
+    Europe PMC indexes every MEDLINE title separately, and the wildcard
+    ``JOURNAL:"Lancet*"`` is not supported (measured: 0 hits for every
+    family tried). So the titles have to be listed and OR-ed together.
+    Measured for 2024, records with an abstract:
+
+        family      flagship only      whole family
+        Lancet             236             1,505
+        Cell               533             3,843
+        Nature           1,280            15,297
+        JAMA               202             3,314
+        BMJ                132            10,615
+        PLoS One        16,617            37,348
     """
+    titles = (journal,) if isinstance(journal, str) else tuple(journal)
+    if len(titles) == 1:
+        journal_clause = f'JOURNAL:"{titles[0]}"'
+    else:
+        journal_clause = "(" + " OR ".join(f'JOURNAL:"{t}"' for t in titles) + ")"
     return (
-        f'JOURNAL:"{journal}" AND FIRST_PDATE:[{year}-01-01 TO {year}-12-31] '
+        f'{journal_clause} AND FIRST_PDATE:[{year}-01-01 TO {year}-12-31] '
         f'AND (PUB_TYPE:"journal article" OR PUB_TYPE:"research article")'
     )
 
@@ -209,7 +248,10 @@ class EpmcProvider:
             raise ValueError(
                 f"unknown journal {venue_key!r}; known: {', '.join(sorted(EPMC_JOURNALS))}")
         self.venue_key = venue_key
-        self.journal, self.journal_name = EPMC_JOURNALS[venue_key]
+        # The registry value is (family of MEDLINE titles, display name).
+        self.journals, self.journal_name = EPMC_JOURNALS[venue_key]
+        #: The flagship title, for the source id and for messages.
+        self.journal = self.journals[0]
         self.sleep = max(0.0, float(sleep))
         self.mailto = (mailto or "").strip() or "research@example.org"
         self.headers = {
@@ -245,16 +287,36 @@ class EpmcProvider:
         return response.json()
 
     # -- harvesting --------------------------------------------------------
-    def iter_year(self, year: int, *, limit: int | None = None) -> Iterator[dict[str, Any]]:
+    def _query(self, year: int, *, has_abstract_only: bool = True) -> str:
+        """The query for one journal-year, with the abstract filter applied.
+
+        The whole family is queried, not just the flagship: Europe PMC
+        indexes each MEDLINE title separately, so asking for one title
+        misses the specials -- which is where the majority of The Lancet's
+        papers live.
+        """
+        query = epmc_query(self.journals, year)
+        if has_abstract_only:
+            query += " AND HAS_ABSTRACT:Y"
+        return query
+
+    def iter_year(self, year: int, *, limit: int | None = None,
+                  has_abstract_only: bool = True) -> Iterator[dict[str, Any]]:
         """Yield the normalised records of one journal-year.
 
         Paging uses Europe PMC's ``cursorMark``: it is the service's own
         cursor and has no record ceiling. The loop stops when a page returns
         fewer records than the page size, when the cursor stops moving, or
         when the limit is reached -- any of the three means "no more".
+
+        ``has_abstract_only`` adds the service's ``HAS_ABSTRACT:Y`` filter.
+        Measured on 2024: BMJ 1,178 -> 132, JAMA 947 -> 202, PLOS ONE
+        16,688 -> 16,617, Cell Reports 1,376 -> 1,374, IEEE TPAMI 753 -> 753.
+        The filter costs nothing where the abstracts are there, and it
+        removes a large tail of editorial matter where they are not.
         """
         params: dict[str, Any] = {
-            "query": epmc_query(self.journal, year),
+            "query": self._query(year, has_abstract_only=has_abstract_only),
             "format": "json",
             "resultType": "core",
             "pageSize": PAGE_SIZE,
@@ -295,9 +357,11 @@ class EpmcProvider:
             if self.sleep:
                 time.sleep(self.sleep)
 
-    def list_year(self, year: int, *, limit: int | None = None) -> list[dict[str, Any]]:
+    def list_year(self, year: int, *, limit: int | None = None,
+                  has_abstract_only: bool = True) -> list[dict[str, Any]]:
         """All the records of one journal-year."""
-        return list(self.iter_year(year, limit=limit))
+        return list(self.iter_year(year, limit=limit,
+                                   has_abstract_only=has_abstract_only))
 
     # -- normalisation -----------------------------------------------------
     def normalize(self, record: dict[str, Any], year: int) -> dict[str, Any] | None:

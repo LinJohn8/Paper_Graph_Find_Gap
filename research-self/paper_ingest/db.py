@@ -126,6 +126,25 @@ def init_db(path: Path | None = None) -> None:
         -- leading column). 195k rows makes that difference the whole query.
         CREATE INDEX IF NOT EXISTS paper_venues_year_only_idx ON paper_venues(year);
         CREATE INDEX IF NOT EXISTS papers_status_idx ON papers(status);
+        -- The reverse edge of the citation graph.
+        --
+        -- ``paper_relations`` has 736,750 rows and its primary key is
+        -- ``(source_paper_id, target_paper_id, relation_type)``, so
+        -- ``target_paper_id`` is not searchable. Two consequences, both
+        -- measured:
+        --
+        -- * every foreign-key cascade that deletes a paper has to look for
+        --   the relations that *point at* it, and without this index that
+        --   lookup is a full scan of 736,750 rows. Pruning 15,312 papers ran
+        --   for over ten minutes and did not finish; with the index the same
+        --   statement takes seconds.
+        -- * the same lookup is what "which papers cite this one" asks, so
+        --   the index serves the related-papers endpoint as well.
+        CREATE INDEX IF NOT EXISTS paper_relations_target_idx
+          ON paper_relations(target_paper_id);
+        -- ``reviews.paper_id`` is the same story on a smaller table: it is a
+        -- foreign key with ON DELETE CASCADE and no index of its own.
+        CREATE INDEX IF NOT EXISTS reviews_paper_idx ON reviews(paper_id);
         """)
         _ensure_sync_job_coverage_columns(con)
         # Phase 1 accidentally added UNIQUE(id), preventing the configured
