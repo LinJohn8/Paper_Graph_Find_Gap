@@ -108,6 +108,37 @@ def test_like_channel_year_filter(con):
     assert "p5" not in hits
 
 
+class TestLikeChannelGate:
+    """The LIKE channel is for short queries only, and that is load-bearing.
+
+    A leading-wildcard LIKE cannot use an index, so each run is a full scan
+    of ``papers`` over both title and abstract. On the 288k corpus that is
+    2.4-5.5 s, and it was the dominant cost of whole-corpus search (the
+    cosine product is 6 ms).
+
+    Measured against the FTS channel on the real corpus, a multi-word query
+    produced *no overlap at all* between the two rankings -- LIKE ordered by
+    title returned 30 papers FTS never chose -- so the scan was spending
+    seconds to inject noise into the RRF fusion. For a single short token it
+    is the channel that finds an acronym inside a longer word, which is the
+    case it was built for.
+    """
+
+    def test_a_multi_word_query_skips_the_scan(self, con):
+        assert retrieval.like_ranking(con, "diffusion models for images", limit=5) == []
+
+    def test_a_single_short_token_still_scans(self, con):
+        assert retrieval.like_ranking(con, "SECI", limit=5)
+
+    def test_a_long_single_token_skips_the_scan(self, con):
+        # 25+ characters is a phrase, not an identifier worth scanning for.
+        assert retrieval.like_ranking(con, "a" * 30, limit=5) == []
+
+    def test_an_empty_query_skips_the_scan(self, con):
+        assert retrieval.like_ranking(con, "   ", limit=5) == []
+        assert retrieval.like_ranking(con, "", limit=5) == []
+
+
 def test_suggest_terms_finds_vocabulary_neighbours():
     vocab = ["semi", "social", "series", "speech", "selection", "specific"]
     out = retrieval.suggest_terms("SECI", vocab)

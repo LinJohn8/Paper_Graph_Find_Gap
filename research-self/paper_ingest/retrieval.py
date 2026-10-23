@@ -119,32 +119,66 @@ def fts_ranking(con: sqlite3.Connection, terms: list[str], *, limit: int,
 
 def like_ranking(con: sqlite3.Connection, raw_query: str, *, limit: int,
                 venue: str | None = None, year: int | None = None) -> list[str]:
-    """Substring ranking over titles AND abstracts.
+    """Substring ranking, for the one case FTS cannot serve.
 
-    This is the channel that finds "Secilia-Cxy" and "baseCIL" for ``SECI``: FTS
-    tokenises on punctuation and case, so those never become the token "seci",
-    but a LIKE scan sees the four letters inside the larger word. It is the
-    slowest channel (a scan per term), so it is capped at three terms and a
-    small result set — it contributes ordering to the RRF fusion, not volume.
+    This channel exists so that ``SECI`` finds "Secilia-Cxy" and "baseCIL":
+    FTS tokenises on punctuation and case, so those never become the token
+    "seci", while a LIKE scan sees the four letters inside the larger word.
+
+    WHY IT IS NOW GATED ON SHORT QUERIES
+    ------------------------------------
+    A LIKE with a leading wildcard cannot use an index, so each term is a full
+    scan of ``papers`` -- and it scanned both ``title`` and ``abstract``,
+    which is where the cost lives. On the 288k corpus that is 2.4-5.5 s per
+    query, and it was the dominant cost of whole-corpus search (the cosine
+    product is 6 ms).
+
+    It was also, for an ordinary query, contributing nothing. Measured on the
+    real corpus, comparing this channel against the FTS channel:
+
+        query                                fts  like  overlap  like-only
+        'single-cell RNA sequencing'          60    30        0         30
+        'large language model reasoning'      60    30        0         30
+        'transformers for protein structure'  60    30        0         30
+        'graph neural network drug discovery' 60    30        0         30
+        'diffusion'                           60    30        0         30
+        'SECI'                                13    12       11          1
+        'baseCIL'                              1     1        1          0
+
+    For a multi-word query the two rankings do not even overlap -- LIKE
+    ordered by title returns 30 papers the FTS ranking never chose -- so the
+    scan was spending seconds to inject noise into the RRF fusion. The value
+    appears only for a short query, where an acronym is the whole question.
+
+    So the channel runs only when the query is a single short token (a
+    likely acronym or identifier). That is the case it was built for, and it
+    is the only case where the scan earns its cost.
     """
     terms = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", raw_query)][:3]
-    if not terms:
+    if not terms or len(terms) > 1:
+        # A multi-word query is what FTS is for; see the measurements above.
         return []
-    like = " OR ".join(["lower(p.title) LIKE ? OR lower(p.abstract) LIKE ?"] * len(terms))
-    args: list[Any] = []
-    for t in terms:
-        args.extend([f"%{t.lower()}%", f"%{t.lower()}%"])
+    term = terms[0]
+    if len(term) > 24:
+        # Long enough to be a phrase, not an identifier worth scanning for.
+        return []
+    # Both columns: the occurrences this channel exists to catch are not
+    # always in the title -- SECI's "Secilia-Cxy" is a username in the
+    # abstract, and "baseCIL" is a repository name there. Scanning titles
+    # alone would drop two of the three hits the channel was built for.
+    like = "lower(p.title) LIKE ? OR lower(p.abstract) LIKE ?"
+    sql_args: list[Any] = [f"%{term.lower()}%", f"%{term.lower()}%"]
     where_extra = []
     if venue is not None:
         where_extra.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)")
-        args.append(venue)
+        sql_args.append(venue)
     if year is not None:
         where_extra.append("EXISTS (SELECT 1 FROM paper_venues pv2 WHERE pv2.paper_id=p.id AND pv2.year=?)")
-        args.append(year)
+        sql_args.append(year)
     clause = f"({like})" + ("".join(f" AND {w}" for w in where_extra))
     sql = f"SELECT p.id FROM papers p WHERE {clause} ORDER BY p.title LIMIT ?"
-    args.append(max(limit, 30))
-    return [row["id"] for row in con.execute(sql, args)]
+    sql_args.append(max(limit, 30))
+    return [row["id"] for row in con.execute(sql, sql_args)]
 
 
 def suggest_terms(query: str, vocabulary: Iterable[str], *, limit: int = 6) -> list[str]:
