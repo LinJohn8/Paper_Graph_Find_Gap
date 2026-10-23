@@ -179,6 +179,41 @@ ZH_TERMS: dict[str, str] = {
     "情感分析": "sentiment analysis", "命名实体": "named entity",
     "语音识别": "speech recognition", "合成": "synthesis", "编辑": "editing",
     "风格迁移": "style transfer", "超分辨率": "super resolution", "去噪": "denoising",
+    # -- life sciences, medicine and chemistry --------------------------------
+    # The corpus now carries journals (PLOS ONE, eLife, Cell Reports, PNAS,
+    # Nature Medicine, NEJM, JAMA, BMJ, The Lancet). A Chinese query about
+    # that material used to reach nothing: "单细胞测序" found 0 papers while
+    # the corpus held papers on single-cell sequencing, because the bridge
+    # knew only the machine-learning vocabulary.
+    "单细胞测序": "single cell sequencing", "单细胞": "single cell",
+    "测序": "sequencing", "基因组": "genome", "基因组学": "genomics",
+    "转录组": "transcriptome", "蛋白质组": "proteome", "表观遗传": "epigenetic",
+    "基因表达": "gene expression", "基因": "gene", "突变": "mutation",
+    "进化": "evolution", "系统发育": "phylogenetic", "微生物": "microbial",
+    "细菌": "bacterial", "病毒": "virus", "免疫": "immune", "免疫学": "immunology",
+    "抗体": "antibody", "疫苗": "vaccine", "感染": "infection",
+    "临床试验": "clinical trial", "随机对照": "randomized controlled trial",
+    "队列研究": "cohort study", "流行病学": "epidemiology", "诊断": "diagnosis",
+    "治疗": "treatment", "疗效": "efficacy", "安全性": "safety",
+    "患者": "patient", "疾病": "disease", "肿瘤": "tumor", "癌症": "cancer",
+    "癌": "carcinoma", "白血病": "leukemia", "糖尿病": "diabetes",
+    "心血管": "cardiovascular", "神经退行": "neurodegenerative",
+    "阿尔茨海默": "alzheimer", "帕金森": "parkinson", "抑郁症": "depression",
+    "精神分裂": "schizophrenia", "炎症": "inflammation", "代谢": "metabolism",
+    "细胞": "cell", "干细胞": "stem cell", "细胞凋亡": "apoptosis",
+    "组织": "tissue", "器官": "organ", "脑": "brain", "神经": "neural",
+    "神经元": "neuron", "突触": "synapse", "信号通路": "signaling pathway",
+    "受体": "receptor", "酶": "enzyme", "催化": "catalysis", "合成生物学": "synthetic biology",
+    "药物设计": "drug design", "药物发现": "drug discovery", "靶点": "target",
+    "化合": "compound", "化学": "chemistry", "材料科学": "materials science",
+    "纳米": "nanoparticle", "晶体": "crystal", "量子": "quantum",
+    "物理": "physics", "光学": "optical", "激光": "laser", "磁": "magnetic",
+    "能量": "energy", "电池": "battery",
+    "生态": "ecology", "环境": "environment",
+    "地球": "earth", "海洋": "ocean", "大气": "atmosphere",
+    "统计": "statistics", "统计显著": "statistical significance",
+    "相关性": "correlation", "因果推断": "causal inference",
+    "队列": "cohort", "样本量": "sample size", "随访": "follow up",
 }
 
 _ZH_PATTERN = re.compile("|".join(re.escape(k) for k in sorted(ZH_TERMS, key=len, reverse=True)))
