@@ -6,6 +6,10 @@ Paper Graph is a local, login-free academic paper browser. It stores source meta
 
 Papers page — the UI opens on the newest year that actually has data, and the Year control offers **All years** to browse the whole corpus at once. The 2022–2026 corpus holds **288,261 papers** (5 conferences + 25 journals):
 
+> The screenshots below were taken while the corpus held 73,675 papers, before
+> the journal harvest that took it to 288,261. The UI is unchanged; only the
+> counts in the images are smaller than today's.
+
 ![Papers page showing 20,412 papers for 2026](docs/screenshots/papers-2026.png)
 
 ![Papers page showing all 73,675 papers across all years](docs/screenshots/papers-all-years.png)
@@ -339,15 +343,28 @@ python -m paper_ingest journals --venue science --year 2025 --since 2026-01-01
 python -m paper_ingest sync-api --venue icml --year 2025
 python -m paper_ingest journal-abstracts --venue cell --year 2024
 python -m paper_ingest jmlr --year 2024
+
+# Data hygiene: see what a prune would remove, then remove it.
+python -m paper_ingest prune-abstractless --source europepmc --dry-run
 ```
 
 The watermark is stored per venue-year and only advances after a *successful*
 harvest — a failed run must not claim to have caught up. A record that has not
 changed is counted and left alone, so re-running a settled year rewrites
-nothing.
+nothing. Both collectors honour it; measured on Cell Reports 2024, a year that
+has not moved costs one request and 1.3 s instead of two pages and 8.3 s:
+
+| query | records | pages | time |
+|---|---:|---:|---:|
+| full year | 1,374 | 2 | 8.3 s |
+| `since 2026-10-01` | 0 | 1 | 1.3 s |
+| `since 2025-01-01` | 18 | 1 | 2.1 s |
 
 The expected-size manifest lives in `Data/expected_counts.yaml`; the same
 block, with the numbers documented, is in `research-self/venues.example.yaml`.
+`coverage` checks all 149 venue-years against it (all ok at the time of
+writing), and a harvest that lands short is reported as `short` on its sync
+job and on the Data Sources page.
 
 ## Start on Windows
 
