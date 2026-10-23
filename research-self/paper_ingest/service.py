@@ -342,6 +342,14 @@ _GRAPH_CACHE: dict[tuple, tuple[float, dict[str, Any]]] = {}
 GRAPH_CACHE_TTL = 600.0
 GRAPH_CACHE_MAX = 8
 
+#: The most titles ``graph_titles`` will return when the caller sends no slugs.
+#:
+#: The map labels a handful of points at a time and always sends slugs. A
+#: caller that asks for the whole corpus in one go gets a bounded, ordered
+#: slice: the unbounded form was a 36 MB response that took 18 s to build,
+#: which reads as a hang rather than as a large answer.
+MAX_UNFILTERED_TITLES = 2000
+
 
 def clear_graph_cache() -> None:
     """Drop cached graph payloads (used by tests and after a corpus rebuild)."""
@@ -368,10 +376,15 @@ def graph(venue: str | None = None, year: int | str | None = None, *,
             return hit[1]
     db.init_db()
     with db.connect() as con:
+        # The vector column is only read when the caller asked for it. It is a
+        # 128-dimension JSON string per paper, and selecting it for the whole
+        # corpus costs ~1.2 MB of string building per thousand rows: the
+        # all-years/all-venues payload took 32 s with it and 2.6 s without.
+        vector_sql = "g.vector_json" if include_vectors else "NULL AS vector_json"
         if all_years:
             # One globally fitted layout (graph_points_global): per-venue-year
             # layouts live in different SVD bases and cannot be overlaid.
-            sql=("""SELECT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,g.vector_json,
+            sql=(f"""SELECT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,{vector_sql},
                     (SELECT max(pv2.year) FROM paper_venues pv2 WHERE pv2.paper_id=p.id) AS point_year
                     FROM graph_points_global g JOIN papers p ON p.id=g.paper_id WHERE 1=1""")
             args: list[Any]=[]
@@ -382,8 +395,8 @@ def graph(venue: str | None = None, year: int | str | None = None, *,
             rows=con.execute(sql,args).fetchall()
             topic_venue=venue or "all"
         else:
-            sql="""SELECT DISTINCT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,g.vector_json
-              FROM graph_points g JOIN papers p ON p.id=g.paper_id JOIN paper_venues pv ON pv.paper_id=p.id WHERE pv.year=?"""
+            sql=(f"""SELECT DISTINCT p.id,p.title,p.primary_area,g.x,g.y,g.region,g.cluster,{vector_sql}
+              FROM graph_points g JOIN papers p ON p.id=g.paper_id JOIN paper_venues pv ON pv.paper_id=p.id WHERE pv.year=?""")
             args=[year]
             if venue:
                 sql+=" AND pv.venue_id=?";args.append(venue)
@@ -432,6 +445,28 @@ def graph_titles(venue: str | None = None, year: int | str | None = None,
     Large maps cannot afford the full title map up front, so the browser asks for
     the handful of slugs it is about to label; the filter happens in SQL rather
     than by building the whole dict and discarding it.
+
+    WHY THE SCOPE IS AN ``IN`` AND NOT AN ``EXISTS``
+    ------------------------------------------------
+    The scope used to be two correlated ``EXISTS`` subqueries over
+    ``paper_venues``. Reading the plan shows what SQLite did with them::
+
+        SCAN p
+        SEARCH pv USING INDEX paper_venues_year_only_idx (year=?)
+
+    that is one scan of ``paper_venues`` *per paper* -- with the corpus at
+    288,261 papers and ~59,000 rows in a year, about 1.7x10^10 comparisons
+    for a query that returns 3,395 titles. The endpoint sat there long
+    enough for the backend to accumulate 1,758 CPU-seconds, and the browser
+    request timed out.
+
+    Driving from ``paper_venues`` instead lets the (venue_id, year) index
+    answer the scope directly and looks the papers up by primary key::
+
+        SEARCH p USING INDEX sqlite_autoindex_papers_1 (id=?)
+        SEARCH pv USING INDEX paper_venues_year_idx (venue_id=? AND year=?)
+
+    Measured on icml/2025: minutes (never finishing) -> 0.3 s.
     """
     all_years = years.is_all(year)
     if not all_years:
@@ -439,21 +474,35 @@ def graph_titles(venue: str | None = None, year: int | str | None = None,
     venue = None if venue == "all" else venue
     db.init_db()
     wanted = [s for s in (slugs or []) if s][:500]
+
+    scope_sql: str
+    scope_args: list[Any] = []
+    if all_years:
+        # The whole corpus: graph_points_global is one row per paper, so this
+        # is a primary-key walk rather than a scan of paper_venues.
+        scope_sql = "SELECT g.paper_id FROM graph_points_global g"
+    elif venue:
+        scope_sql = ("SELECT pv.paper_id FROM paper_venues pv "
+                     "WHERE pv.venue_id=? AND pv.year=?")
+        scope_args = [venue, year]
+    else:
+        scope_sql = "SELECT pv.paper_id FROM paper_venues pv WHERE pv.year=?"
+        scope_args = [year]
+
+    clauses: list[str] = [f"p.id IN ({scope_sql})"]
+    args: list[Any] = list(scope_args)
+    if wanted:
+        clauses.append(f"p.id IN ({','.join('?' * len(wanted))})")
+        args.extend(wanted)
+    sql = "SELECT p.id, p.title FROM papers p WHERE " + " AND ".join(clauses)
+    # A whole-corpus title map is not something a caller can use: 288,261
+    # titles is a 36 MB response that takes 18 s to build, and the map only
+    # ever labels a handful of points at a time. The browser always sends
+    # slugs; a caller that does not gets a bounded slice instead of a
+    # response that looks like a hang. The slice is deterministic (ordered by
+    # id) so repeated calls agree.
+    sql += f" ORDER BY p.id LIMIT {MAX_UNFILTERED_TITLES}"
     with db.connect() as con:
-        clauses: list[str] = []
-        args: list[Any] = []
-        if all_years:
-            clauses.append("EXISTS (SELECT 1 FROM graph_points_global g WHERE g.paper_id=p.id)")
-        else:
-            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.year=?)")
-            args.append(year)
-        if venue:
-            clauses.append("EXISTS (SELECT 1 FROM paper_venues pv WHERE pv.paper_id=p.id AND pv.venue_id=?)")
-            args.append(venue)
-        if wanted:
-            clauses.append(f"p.id IN ({','.join('?' * len(wanted))})")
-            args.extend(wanted)
-        sql = "SELECT p.id, p.title FROM papers p WHERE " + " AND ".join(clauses)
         return {row["id"]: row["title"] for row in con.execute(sql, args)}
 
 

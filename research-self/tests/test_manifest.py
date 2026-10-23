@@ -216,14 +216,36 @@ def test_verify_corpus_without_a_manifest_is_empty(temp_db):
 
 
 def test_registry_template_expectations_are_loadable():
-    """The tracked template must stay parseable by the loader it documents."""
+    """The tracked template must stay parseable by the loader it documents.
+
+    The numbers are regenerated from the measured corpus, so this asserts the
+    *semantics* of the block rather than a particular count -- pinning 4050
+    here meant every legitimate re-measurement broke the test, which teaches
+    nobody anything about the manifest.
+    """
     from pathlib import Path
 
     template = Path(__file__).resolve().parents[1] / "venues.example.yaml"
     loaded = manifest.load_manifest(template)
+    assert len(loaded) > 50, "the template carries an expectation per venue-year"
     assert ("neurips", 2024) in loaded
-    assert loaded[("neurips", 2024)].min_papers == 4050
-    assert loaded[("neurips", 2024)].max_papers == 5050
+
+    neurips = loaded[("neurips", 2024)]
+    assert neurips.min_papers is not None and neurips.min_papers > 0
+    assert neurips.max_papers is not None
+    assert neurips.min_papers < neurips.max_papers, "a floor below its ceiling"
+
+    # Every entry must be a usable range: floor <= ceiling, both positive
+    # (JMLR 2026 is the documented exception, handled below).
+    for (venue, year), expectation in loaded.items():
+        if (venue, year) == ("jmlr", 2026):
+            continue
+        assert expectation.min_papers is not None, f"{venue} {year} has no floor"
+        assert expectation.min_papers >= 0
+        if expectation.max_papers is not None:
+            assert expectation.min_papers <= expectation.max_papers, \
+                f"{venue} {year}: floor above ceiling"
+
     # JMLR 2026 has no volume yet: the floor is zero and there is no ceiling.
     assert loaded[("jmlr", 2026)].min_papers == 0
     assert loaded[("jmlr", 2026)].max_papers is None

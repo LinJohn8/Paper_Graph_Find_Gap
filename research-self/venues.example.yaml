@@ -184,107 +184,479 @@ venues:
 # (50 for >=1000 papers, 10 for >=100, 5 below), so ordinary year-to-year
 # jitter is tolerated but a real loss of a volume is not.
 expected:
-  iclr:
-    2022: {min_papers: 950, max_papers: 1250}
-    2023: {min_papers: 1400, max_papers: 1750}
-    2024: {min_papers: 2050, max_papers: 2550}
-    2025: {min_papers: 3400, max_papers: 4250}
-    2026: {min_papers: 4900, max_papers: 6050}
-  icml:
-    2022: {min_papers: 1100, max_papers: 1400}
-    2023: {min_papers: 1600, max_papers: 2050}
-    2024: {min_papers: 2350, max_papers: 2950}
-    2025: {min_papers: 3050, max_papers: 3750}
-    2026: {min_papers: 5850, max_papers: 7250}
-  neurips:
-    2022: {min_papers: 2550, max_papers: 3200}
-    2023: {min_papers: 3250, max_papers: 4050}
-    2024: {min_papers: 4050, max_papers: 5050}
-    2025: {min_papers: 5250, max_papers: 6500}
   acl:
-    2022: {min_papers: 690, max_papers: 860}
-    2023: {min_papers: 1100, max_papers: 1400}
-    2024: {min_papers: 900, max_papers: 1200}
-    2025: {min_papers: 1750, max_papers: 2200}
-    2026: {min_papers: 2350, max_papers: 2950}
-  cvpr:
-    2022: {min_papers: 1850, max_papers: 2300}
-    2023: {min_papers: 2100, max_papers: 2650}
-    2024: {min_papers: 2450, max_papers: 3050}
-    2025: {min_papers: 2650, max_papers: 3250}
-    2026: {min_papers: 3600, max_papers: 4450}
-  tmlr:
-    2022: {min_papers: 190, max_papers: 240}
-    2023: {min_papers: 540, max_papers: 680}
-    2024: {min_papers: 850, max_papers: 1050}
-    2025: {min_papers: 1250, max_papers: 1600}
-    2026: {min_papers: 1500, max_papers: 1900}
-  nature:
-    2022: {min_papers: 3100, max_papers: 3850}
-    2023: {min_papers: 3250, max_papers: 4050}
-    2024: {min_papers: 3250, max_papers: 4050}
-    2025: {min_papers: 3350, max_papers: 4150}
-    2026: {min_papers: 2700, max_papers: 3350}
-  naturemi:
-    2022: {min_papers: 140, max_papers: 180}
-    2023: {min_papers: 150, max_papers: 190}
-    2024: {min_papers: 150, max_papers: 200}
-    2025: {min_papers: 170, max_papers: 220}
-    2026: {min_papers: 130, max_papers: 170}
-  naturecomms:
-    2022: {min_papers: 6800, max_papers: 8350}
-    2023: {min_papers: 7250, max_papers: 8950}
-    # 2024 onwards hit OpenAlex' unkeyed deep-paging ceiling of 10,000 works
-    # per year, so the measured count is the cap, not the journal's real size.
-    2024: {min_papers: 9000, max_papers: 11000, note: "Measured count is the OpenAlex unkeyed deep-paging ceiling (10,000 works)."}
-    2025: {min_papers: 9000, max_papers: 11000, note: "Measured count is the OpenAlex unkeyed deep-paging ceiling (10,000 works)."}
-    2026: {min_papers: 8950, max_papers: 11000, note: "Measured count is the OpenAlex unkeyed deep-paging ceiling (10,000 works)."}
-  science:
-    2022: {min_papers: 1550, max_papers: 1950}
-    2023: {min_papers: 1500, max_papers: 1850}
-    2024: {min_papers: 1550, max_papers: 1950}
-    2025: {min_papers: 1550, max_papers: 1950}
-    2026: {min_papers: 1250, max_papers: 1600}
+    '2022':
+      max_papers: 850
+      min_papers: 700
+    '2023':
+      max_papers: 1350
+      min_papers: 1100
+    '2024':
+      max_papers: 1150
+      min_papers: 950
+    '2025':
+      max_papers: 2150
+      min_papers: 1750
+    '2026':
+      max_papers: 2900
+      min_papers: 2400
+  bmj:
+    '2022':
+      max_papers: 210
+      min_papers: 170
+    '2023':
+      max_papers: 160
+      min_papers: 130
+    '2024':
+      max_papers: 130
+      min_papers: 110
+    '2025':
+      max_papers: 140
+      min_papers: 110
+    '2026':
+      max_papers: 120
+      min_papers: 100
   cell:
-    2022: {min_papers: 370, max_papers: 470}
-    2023: {min_papers: 400, max_papers: 500}
-    2024: {min_papers: 510, max_papers: 640}
-    2025: {min_papers: 430, max_papers: 540}
-    2026: {min_papers: 410, max_papers: 510}
-  tpami:
-    2022: {min_papers: 550, max_papers: 680}
-    2023: {min_papers: 600, max_papers: 750}
-    2024: {min_papers: 600, max_papers: 750}
-    2025: {min_papers: 840, max_papers: 1040}
-    2026: {min_papers: 760, max_papers: 930}
+    '2022':
+      max_papers: 440
+      min_papers: 360
+    '2023':
+      max_papers: 470
+      min_papers: 390
+    '2024':
+      max_papers: 600
+      min_papers: 500
+    '2025':
+      max_papers: 510
+      min_papers: 420
+    '2026':
+      max_papers: 490
+      min_papers: 400
+  cellrep:
+    '2022':
+      max_papers: 1600
+      min_papers: 1350
+    '2023':
+      max_papers: 1750
+      min_papers: 1400
+    '2024':
+      max_papers: 1500
+      min_papers: 1250
+    '2025':
+      max_papers: 1650
+      min_papers: 1350
+    '2026':
+      max_papers: 1350
+      min_papers: 1100
+  cvpr:
+    '2022':
+      max_papers: 2300
+      min_papers: 1850
+    '2023':
+      max_papers: 2600
+      min_papers: 2150
+    '2024':
+      max_papers: 3000
+      min_papers: 2450
+    '2025':
+      max_papers: 3250
+      min_papers: 2650
+    '2026':
+      max_papers: 4450
+      min_papers: 3650
+  elife:
+    '2022':
+      max_papers: 2150
+      min_papers: 1750
+    '2023':
+      max_papers: 1650
+      min_papers: 1350
+    '2024':
+      max_papers: 1700
+      min_papers: 1400
+    '2025':
+      max_papers: 1500
+      min_papers: 1200
+    '2026':
+      max_papers: 890
+      min_papers: 730
+  iclr:
+    '2022':
+      max_papers: 1200
+      min_papers: 1000
+    '2023':
+      max_papers: 1750
+      min_papers: 1450
+    '2024':
+      max_papers: 2550
+      min_papers: 2050
+    '2025':
+      max_papers: 4200
+      min_papers: 3450
+    '2026':
+      max_papers: 6000
+      min_papers: 4900
+  icml:
+    '2022':
+      max_papers: 1400
+      min_papers: 1150
+    '2023':
+      max_papers: 2000
+      min_papers: 1650
+    '2024':
+      max_papers: 2900
+      min_papers: 2400
+    '2025':
+      max_papers: 3750
+      min_papers: 3050
+    '2026':
+      max_papers: 7200
+      min_papers: 5900
   ijcv:
-    2022: {min_papers: 160, max_papers: 200}
-    2023: {min_papers: 180, max_papers: 240}
-    2024: {min_papers: 300, max_papers: 370}
-    2025: {min_papers: 230, max_papers: 290}
-    2026: {min_papers: 390, max_papers: 490}
-  jmlr:
-    2022: {min_papers: 310, max_papers: 390}
-    2023: {min_papers: 360, max_papers: 450}
-    2024: {min_papers: 370, max_papers: 470}
-    2025: {min_papers: 270, max_papers: 350}
-    # No JMLR volume exists for 2026 yet, so any count is acceptable here.
-    2026: {min_papers: 0, note: "No JMLR volume for 2026 is published yet."}
-  prl:
-    2022: {min_papers: 1850, max_papers: 2350}
-    2023: {min_papers: 1900, max_papers: 2400}
-    2024: {min_papers: 2200, max_papers: 2750}
-    2025: {min_papers: 2900, max_papers: 3600}
-    2026: {min_papers: 2050, max_papers: 2550}
+    '2022':
+      max_papers: 200
+      min_papers: 160
+    '2023':
+      max_papers: 230
+      min_papers: 190
+    '2024':
+      max_papers: 370
+      min_papers: 300
+    '2025':
+      max_papers: 290
+      min_papers: 230
+    '2026':
+      max_papers: 490
+      min_papers: 400
   jacs:
-    2022: {min_papers: 2250, max_papers: 2800}
-    2023: {min_papers: 2650, max_papers: 3300}
-    2024: {min_papers: 3250, max_papers: 4000}
-    2025: {min_papers: 4150, max_papers: 5150}
-    2026: {min_papers: 3700, max_papers: 4600}
+    '2022':
+      max_papers: 2800
+      min_papers: 2250
+    '2023':
+      max_papers: 3300
+      min_papers: 2700
+    '2024':
+      max_papers: 4000
+      min_papers: 3250
+    '2025':
+      max_papers: 5100
+      min_papers: 4200
+    '2026':
+      max_papers: 4550
+      min_papers: 3750
+  jama:
+    '2022':
+      max_papers: 230
+      min_papers: 180
+    '2023':
+      max_papers: 230
+      min_papers: 190
+    '2024':
+      max_papers: 220
+      min_papers: 180
+    '2025':
+      max_papers: 210
+      min_papers: 170
+    '2026':
+      max_papers: 210
+      min_papers: 170
+  jmlr:
+    '2022':
+      max_papers: 390
+      min_papers: 320
+    '2023':
+      max_papers: 440
+      min_papers: 360
+    '2024':
+      max_papers: 460
+      min_papers: 380
+    '2025':
+      max_papers: 340
+      min_papers: 280
+    '2026':
+      min_papers: 0
   lancet:
-    2022: {min_papers: 1200, max_papers: 1550}
-    2023: {min_papers: 1300, max_papers: 1600}
-    2024: {min_papers: 1350, max_papers: 1700}
-    2025: {min_papers: 1150, max_papers: 1450}
-    2026: {min_papers: 950, max_papers: 1250}
+    '2022':
+      max_papers: 290
+      min_papers: 230
+    '2023':
+      max_papers: 360
+      min_papers: 290
+    '2024':
+      max_papers: 270
+      min_papers: 220
+    '2025':
+      max_papers: 290
+      min_papers: 230
+    '2026':
+      max_papers: 230
+      min_papers: 180
+  natmed:
+    '2022':
+      max_papers: 260
+      min_papers: 210
+    '2023':
+      max_papers: 300
+      min_papers: 240
+    '2024':
+      max_papers: 360
+      min_papers: 290
+    '2025':
+      max_papers: 400
+      min_papers: 330
+    '2026':
+      max_papers: 370
+      min_papers: 300
+  nature:
+    '2022':
+      max_papers: 2000
+      min_papers: 1600
+    '2023':
+      max_papers: 1500
+      min_papers: 1250
+    '2024':
+      max_papers: 940
+      min_papers: 770
+    '2025':
+      max_papers: 1070
+      min_papers: 880
+    '2026':
+      max_papers: 910
+      min_papers: 750
+  naturecomms:
+    '2022':
+      max_papers: 8300
+      min_papers: 6800
+    '2023':
+      max_papers: 8900
+      min_papers: 7300
+    '2024':
+      max_papers: 11000
+      min_papers: 9000
+    '2025':
+      max_papers: 11000
+      min_papers: 9000
+    '2026':
+      max_papers: 10950
+      min_papers: 9000
+  naturemethods:
+    '2022':
+      max_papers: 75
+      min_papers: 60
+    '2023':
+      max_papers: 120
+      min_papers: 100
+    '2024':
+      max_papers: 140
+      min_papers: 110
+    '2025':
+      max_papers: 150
+      min_papers: 120
+    '2026':
+      max_papers: 85
+      min_papers: 70
+  naturemi:
+    '2022':
+      max_papers: 30
+      min_papers: 20
+    '2023':
+      max_papers: 50
+      min_papers: 40
+    '2024':
+      max_papers: 50
+      min_papers: 40
+    '2025':
+      max_papers: 65
+      min_papers: 55
+    '2026':
+      max_papers: 50
+      min_papers: 40
+  nejm:
+    '2022':
+      max_papers: 230
+      min_papers: 190
+    '2023':
+      max_papers: 230
+      min_papers: 190
+    '2024':
+      max_papers: 250
+      min_papers: 210
+    '2025':
+      max_papers: 230
+      min_papers: 190
+    '2026':
+      max_papers: 210
+      min_papers: 170
+  neurips:
+    '2022':
+      max_papers: 3150
+      min_papers: 2600
+    '2023':
+      max_papers: 4000
+      min_papers: 3300
+    '2024':
+      max_papers: 5000
+      min_papers: 4100
+    '2025':
+      max_papers: 6500
+      min_papers: 5300
+  neuron:
+    '2022':
+      max_papers: 95
+      min_papers: 80
+    '2023':
+      max_papers: 110
+      min_papers: 90
+    '2024':
+      max_papers: 110
+      min_papers: 90
+    '2025':
+      max_papers: 130
+      min_papers: 110
+    '2026':
+      max_papers: 140
+      min_papers: 110
+  npjqi:
+    '2022':
+      max_papers: 160
+      min_papers: 130
+    '2023':
+      max_papers: 130
+      min_papers: 110
+    '2024':
+      max_papers: 140
+      min_papers: 120
+    '2025':
+      max_papers: 230
+      min_papers: 190
+    '2026':
+      max_papers: 240
+      min_papers: 190
+  plomed:
+    '2022':
+      max_papers: 230
+      min_papers: 190
+    '2023':
+      max_papers: 170
+      min_papers: 140
+    '2024':
+      max_papers: 160
+      min_papers: 130
+    '2025':
+      max_papers: 190
+      min_papers: 160
+    '2026':
+      max_papers: 250
+      min_papers: 200
+  plosone:
+    '2022':
+      max_papers: 17150
+      min_papers: 14050
+    '2023':
+      max_papers: 15900
+      min_papers: 13000
+    '2024':
+      max_papers: 18300
+      min_papers: 14950
+    '2025':
+      max_papers: 20050
+      min_papers: 16400
+    '2026':
+      max_papers: 12900
+      min_papers: 10550
+  pnas:
+    '2022':
+      max_papers: 3750
+      min_papers: 3050
+    '2023':
+      max_papers: 3400
+      min_papers: 2750
+    '2024':
+      max_papers: 3700
+      min_papers: 3050
+    '2025':
+      max_papers: 4000
+      min_papers: 3300
+    '2026':
+      max_papers: 3750
+      min_papers: 3100
+  prl:
+    '2022':
+      max_papers: 2300
+      min_papers: 1900
+    '2023':
+      max_papers: 2350
+      min_papers: 1950
+    '2024':
+      max_papers: 2750
+      min_papers: 2250
+    '2025':
+      max_papers: 3500
+      min_papers: 2850
+    '2026':
+      max_papers: 2250
+      min_papers: 1850
+  science:
+    '2022':
+      max_papers: 1700
+      min_papers: 1400
+    '2023':
+      max_papers: 1600
+      min_papers: 1300
+    '2024':
+      max_papers: 1700
+      min_papers: 1400
+    '2025':
+      max_papers: 1700
+      min_papers: 1400
+    '2026':
+      max_papers: 1400
+      min_papers: 1100
+  scirobot:
+    '2022':
+      max_papers: 90
+      min_papers: 75
+    '2023':
+      max_papers: 100
+      min_papers: 80
+    '2024':
+      max_papers: 150
+      min_papers: 120
+    '2025':
+      max_papers: 140
+      min_papers: 110
+    '2026':
+      max_papers: 100
+      min_papers: 80
+  tmlr:
+    '2022':
+      max_papers: 240
+      min_papers: 190
+    '2023':
+      max_papers: 670
+      min_papers: 550
+    '2024':
+      max_papers: 1050
+      min_papers: 860
+    '2025':
+      max_papers: 1600
+      min_papers: 1300
+    '2026':
+      max_papers: 1850
+      min_papers: 1550
+  tpami:
+    '2022':
+      max_papers: 650
+      min_papers: 530
+    '2023':
+      max_papers: 740
+      min_papers: 610
+    '2024':
+      max_papers: 740
+      min_papers: 610
+    '2025':
+      max_papers: 1030
+      min_papers: 840
+    '2026':
+      max_papers: 910
+      min_papers: 740

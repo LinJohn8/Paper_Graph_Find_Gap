@@ -4,7 +4,7 @@ Paper Graph is a local, login-free academic paper browser. It stores source meta
 
 ## Screenshots
 
-Papers page — the UI opens on the newest year that actually has data, and the Year control offers **All years** to browse the whole corpus at once. The repaired 2022–2026 corpus holds **73,675 papers** (5 conferences + TMLR journal):
+Papers page — the UI opens on the newest year that actually has data, and the Year control offers **All years** to browse the whole corpus at once. The 2022–2026 corpus holds **288,261 papers** (5 conferences + 25 journals):
 
 ![Papers page showing 20,412 papers for 2026](docs/screenshots/papers-2026.png)
 
@@ -14,7 +14,7 @@ Paper map — one semantic coordinate per paper (TF-IDF/SVD + t-SNE neighbourhoo
 
 ![Paper map for 2026 with 20,412 points](docs/screenshots/map-2026.png)
 
-Paper map with **All years**: the whole corpus in one globally fitted semantic space (PCA-2 over a single TF-IDF/SVD model fitted on all 73,675 papers — per-venue-year layouts live in separate SVD bases and cannot be overlaid):
+Paper map with **All years**: the whole corpus in one globally fitted semantic space (PCA-2 over a single TF-IDF/SVD model fitted on the whole corpus — per-venue-year layouts live in separate SVD bases and cannot be overlaid):
 
 ![Whole-corpus paper map with 73,675 points](docs/screenshots/map-all-years.png)
 
@@ -97,77 +97,110 @@ Two slow endpoints (`/api/papers/semantic`, `/api/gaps`) are Next.js route handl
 
 Every venue-year was rebuilt from the publishers' own indexes (ICLR virtual site, PMLR, NeurIPS Proceedings, ACL Anthology, CVF Open Access, jmlr.org for TMLR) and then deduplicated across sources. Journal papers come from OpenAlex (see the journal section below). Conference counts grow strictly year over year:
 
-| Year | Conference papers | Journal papers | Total | Conference abstract coverage |
+| Year | Conference papers | Journal papers | Total | Abstract coverage |
 |---:|---:|---:|---:|---:|
-| 2022 | 8,294 | 21,374 | 29,668 | 97% |
-| 2023 | 11,291 | 22,807 | 34,098 | 94% |
-| 2024 | 14,227 | 26,128 | 40,355 | 93% |
-| 2025 | 19,451 | 27,899 | 47,350 | 92% |
-| 2026 | 20,412 | 24,728 | 45,140 | 91% |
-| **Total** | **73,675** | **122,936** | **196,611** | **93%** |
+| 2022 | 8,590 | 40,917 | 49,506 | 100% |
+| 2023 | 11,622 | 39,855 | 51,478 | 99% |
+| 2024 | 14,582 | 44,838 | 59,420 | 98% |
+| 2025 | 19,913 | 48,578 | 68,491 | 98% |
+| 2026 | 20,831 | 38,535 | 59,366 | 97% |
+| **Total** | **75,538** | **212,723** | **288,261** | **98%** |
 
-Known gaps: NeurIPS 2026 proceedings are not published yet (December 2026); TMLR abstracts are behind an OpenReview Cloudflare challenge (metadata is complete); 122 measured title-variant cross-source twins are retained rather than deleted. Root causes, fixes, per-cell expected-vs-actual numbers, and the rollback files are documented in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md).
+Known gaps: NeurIPS 2026 proceedings are not published yet (December 2026); TMLR abstracts are behind an OpenReview Cloudflare challenge (metadata is complete — 4,914 papers, 1% with an abstract); 122 measured title-variant cross-source twins are retained rather than deleted. Root causes, fixes, per-cell expected-vs-actual numbers, and the rollback files are documented in [DATA_COVERAGE_REPAIR_REPORT.md](DATA_COVERAGE_REPAIR_REPORT.md).
 
-## Journal papers (Springer Nature, Science/Cell, IEEE, JMLR, …)
+## Journal papers (Springer Nature, Science/Cell, IEEE, PLOS, PNAS, …)
 
 The corpus was conference-only, which biased retrieval toward CS conference
 literature. It now also carries high-impact **journals** with the same metadata
 scope as everything else (title + abstract + authors + DOI + year; no PDFs).
-**122,936 journal papers across 15 titles × 2022–2026; 196,611 papers total.**
+**212,723 journal papers across 25 titles × 2022–2026; 288,261 papers total,
+98% of them with an abstract.**
 
-- **Source**: OpenAlex journal source ids (`paper_ingest/provider_journals.py`),
-  15 curated titles across Springer Nature (Nature, Nature MI, Nature
-  Communications, Nature Methods/Neuroscience, npj QI), AAAS/Cell Press
-  (Science, Cell, Neuron), IEEE (TPAMI, IJCV), JMLR, APS (PRL) and
-  chemistry/medicine (JACS, The Lancet). `type:article` only — editorials and
-  corrections are excluded by design. **JMLR is the exception**: OpenAlex
-  attaches almost no recent works to its source (per-year count 0 for
-  2022–2024/2026), so it comes from the publisher's own site instead
-  (`paper_ingest/jmlr.py`, the same jmlr.org that serves TMLR) — 1,486 papers
-  with 100% abstract coverage.
-- **Abstract recovery** (measured, per journal):
+- **Source**: two collectors, because one is not enough.
+  - **OpenAlex journal source ids** (`paper_ingest/provider_journals.py`),
+    15 curated titles across Springer Nature (Nature, Nature MI, Nature
+    Communications, Nature Methods/Neuroscience, npj QI), AAAS/Cell Press
+    (Science, Cell, Neuron), IEEE (TPAMI, IJCV), JMLR, APS (PRL) and
+    chemistry/medicine (JACS, The Lancet). `type:article` only — editorials
+    and corrections are excluded by design. **JMLR is the exception**:
+    OpenAlex attaches almost no recent works to its source (per-year count 0
+    for 2022–2024/2026), so it comes from the publisher's own site instead
+    (`paper_ingest/jmlr.py`, the same jmlr.org that serves TMLR) — 1,486
+    papers with 100% abstract coverage.
+  - **Europe PMC** (`paper_ingest/provider_epmc.py`), the EBI's public
+    service, for the ten titles OpenAlex never listed — PLOS ONE, PNAS,
+    eLife, Cell Reports, Nature Medicine, Science Robotics, NEJM, JAMA, BMJ
+    and PLOS Medicine — and for IEEE TPAMI and Nature Machine Intelligence,
+    the machine-learning venues the corpus was weakest on. It needs no key,
+    serves the full abstract of every record it holds, and pages with a
+    cursor, so there is no 10,000-record ceiling.
+- **Abstract coverage** (measured from the corpus, 2026-10-22):
 
-  | Journal | Papers | Abstract coverage |
+  | Venue | Papers | Abstract coverage |
   |---|---:|---:|
-  | Nature Communications | 45,655 | 99% |
-  | JACS | 17,956 | 99% |
-  | Nature | 17,568 | 28%¹ |
-  | Physical Review Letters | 12,271 | 97% |
-  | Science | 8,392 | 56%¹ |
-  | The Lancet | 6,755 | 5%² |
-  | IEEE TPAMI | 3,747 | 98% |
-  | Cell | 2,389 | 86%³ |
-  | JMLR | 1,486 | 100% |
+  | PLOS ONE | 76,620 | 100% |
+  | Nature Communications | 45,644 | 100% |
+  | JACS | 17,933 | 100% |
+  | PNAS | 16,934 | 100% |
+  | NeurIPS | 16,955 | 100% |
+  | ICML | 15,682 | 100% |
+  | CVPR | 14,164 | 100% |
+  | ICLR | 14,267 | 100% |
+  | Physical Review Letters | 11,966 | 100% |
+  | Science | 7,361 | 100% |
+  | Cell Reports | 7,171 | 100% |
+  | ACL / ARR | 7,693 | 100% |
+  | eLife | 7,140 | 100% |
+  | IEEE TPAMI | 3,705 | 100% |
+  | Nature | 5,833 | 100% |
+  | TMLR | 4,914 | 1%¹ |
+  | Cell | 2,285 | 100% |
+  | Nature Medicine | 1,533 | 100% |
   | IJCV | 1,430 | 100% |
-  | Nature MI / Methods / Neuron / npj QI | 5,287 | 26–99%¹ |
-  | **All journals** | **122,936** | **78%** |
+  | The Lancet | 1,294 | 100% |
+  | NEJM | 1,042 | 100% |
+  | JAMA | 1,003 | 100% |
+  | PLOS Medicine | 919 | 100% |
+  | BMJ | 682 | 100% |
+  | Science Robotics | 520 | 100% |
+  | JMLR | 1,486 | 100% |
+  | Nature Machine Intelligence | 222 | 100% |
+  | **All journals** | **212,723** | **98%** |
 
-  Two channels, tried in order (`paper_ingest/journal_abstracts.py`):
+  ¹ TMLR's abstracts are behind an OpenReview Cloudflare challenge. The
+  metadata is complete; the abstracts are not retrievable without
+  bypassing the challenge, which this project does not do.
+
+- **The corpus holds only what it can use.** A record with no abstract is
+  nearly inert here: the semantic model is fitted on
+  `title × 3 + keywords × 2 + abstract`, so an abstract-less record lands in
+  a cluster defined by its title words alone and drags its centroid, and the
+  idea finder cannot read it at all. Such records are pruned
+  (`python -m paper_ingest prune-abstractless --dry-run` to see the plan).
+  That is why The Lancet reads 1,294 papers rather than 6,755: the rest are
+  records no service will give an abstract for, and the earlier corpus kept
+  them.
+- **Abstract recovery** (measured, per journal), two channels in order
+  (`paper_ingest/journal_abstracts.py`):
   1. **Europe PMC** (EBI's public API, no key) — carries the research articles
-     with their *full* abstract. Measured 39/40 hits on the real pending set at
-     2.2 lookups/second, stable at 10 concurrent requests. This is what took
-     Cell from 43% to 86% and IJCV to 100%.
+     with their *full* abstract. It is asked for the whole journal-year at
+     once, not one DOI at a time: one request per thousand papers instead of
+     one per paper, and a paper the batch does not hold costs no further
+     request.
   2. **The publisher's landing page** — the article's abstract block
      (`<div id="Abs1-content">`, 1,666 chars) or `og:description` (a 243-char
      teaser). Needed for what Europe PMC does not index.
-
-  ¹ The remaining gap is the data, not the collector: Nature's *news* DOIs
-     (`10.1038/d41586-*`) are not research articles, Europe PMC does not carry
-     them, and the publisher serves them a challenge page. The pass detects
-     that and stops rather than burning an hour for nothing.
-  ² The Lancet's abstracts are withheld by the publisher (PubMed and Europe
-     PMC both show none for them) — a copyright policy, not a bug.
-  ³ Elsevier's site is behind a bot wall (doi.org serves a meta-refresh
-     interstitial, direct URLs 403), so Elsevier rows rely on Europe PMC.
-- **Harvest**: `python _run_journals.py [journal] [year] [--limit N]
-  [--no-backfill]` (idempotent). Measured OpenAlex limits, all handled:
+- **Harvest**: `python -m paper_ingest journals --venue <key> --year <year>`
+  (idempotent), or `python -m paper_ingest harvest` for the whole plan.
+  Measured OpenAlex limits, all handled:
   - **Cursor paging is gated** (HTTP 401 without a key) — the provider pages by
     offset instead.
   - **Offset paging stops at 50 pages / 10,000 works** (page 50 → 200, page 51
-    → HTTP 400). Years above that (Nature Communications 2024–2026) import as
-    their first 10,000 articles; the year is still recorded.
+    → HTTP 400). Years above that import as their first 10,000 articles; the
+    year is still recorded and the shortfall is reported.
   - **Per-IP daily budget** — HTTP 401 when exhausted; rerun the next day or
-    set a free `OPENALEX_API_KEY`.
+    set a free `OPENALEX_API_KEY`. Europe PMC has no such budget, which is
+    why it is the second collector rather than the first.
 
 ## Semantics upgrade (2026-10)
 
