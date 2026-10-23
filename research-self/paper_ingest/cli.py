@@ -304,7 +304,9 @@ def _harvest_one_journal(key: str, year: int, args: argparse.Namespace) -> dict[
         result = import_epmc_journal_year(
             key, year, limit=getattr(args, "limit", None),
             has_abstract_only=not getattr(args, "with_abstractless", False),
-            mailto=getattr(args, "mailto", None))
+            mailto=getattr(args, "mailto", None),
+            since=getattr(args, "since", None),
+            incremental=bool(getattr(args, "incremental", False)))
         result["source"] = "europepmc"
     else:
         result = import_journal_year(

@@ -342,6 +342,8 @@ def import_epmc_journal_year(
     limit: int | None = None,
     has_abstract_only: bool = True,
     mailto: str | None = None,
+    since: str | None = None,
+    incremental: bool = False,
 ) -> dict[str, Any]:
     """Harvest one journal-year from Europe PMC and write it into the corpus.
 
@@ -362,6 +364,12 @@ def import_epmc_journal_year(
     map. Where Europe PMC indexes a journal well the filter costs nothing
     (PLOS ONE 16,688 -> 16,617, Cell Reports 1,376 -> 1,374, IEEE TPAMI
     753 -> 753).
+
+    ``incremental=True`` reuses the stored watermark and asks Europe PMC only
+    for the records it created since, so a settled year costs one request
+    instead of many. ``since`` overrides the watermark explicitly. The
+    watermark advances only after a successful run -- a failed harvest must
+    not claim to have caught up.
     """
     from .provider_epmc import EPMC_JOURNALS, EpmcProvider
 
@@ -374,7 +382,7 @@ def import_epmc_journal_year(
     counts: dict[str, Any] = {
         "venue": venue_key, "year": year, "status": "success",
         "fetched": 0, "inserted": 0, "updated": 0, "unchanged": 0,
-        "no_abstract": 0, "recovered": 0, "error": None,
+        "no_abstract": 0, "recovered": 0, "error": None, "since": None,
     }
     provider = EpmcProvider(venue_key, mailto=mailto)
     job_id = None
@@ -407,10 +415,16 @@ def import_epmc_journal_year(
                 "WHERE pv.venue_id=? AND pv.year=?", (venue_key, year),
             ):
                 stored_abstract[row["id"]] = row["abstract"]
+
+            watermark = since
+            if incremental and watermark is None:
+                watermark = _read_watermark(con, venue_key, year)
+            counts["since"] = watermark
             con.commit()
 
             for position, paper in enumerate(provider.iter_year(
-                    year, limit=limit, has_abstract_only=has_abstract_only)):
+                    year, limit=limit, has_abstract_only=has_abstract_only,
+                    since=watermark)):
                 counts["fetched"] += 1
                 if not paper.get("abstract"):
                     counts["no_abstract"] += 1

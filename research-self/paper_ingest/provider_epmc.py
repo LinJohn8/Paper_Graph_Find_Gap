@@ -174,7 +174,8 @@ __all__ = [
 ]
 
 
-def epmc_query(journal: str | tuple[str, ...], year: int) -> str:
+def epmc_query(journal: str | tuple[str, ...], year: int,
+               *, since: str | None = None) -> str:
     """The Europe PMC query for one journal-year.
 
     ``FIRST_PDATE`` is the journal's own first-publication date, which is the
@@ -198,16 +199,27 @@ def epmc_query(journal: str | tuple[str, ...], year: int) -> str:
         JAMA               202             3,314
         BMJ                132            10,615
         PLoS One        16,617            37,348
+
+    ``since`` narrows the query to the records Europe PMC *created* after
+    that date (``CREATION_DATE``), which is the same idea as OpenAlex's
+    ``from_created_date``: a settled journal-year only changes as the index
+    catches up, so an incremental run should ask for what is new rather than
+    for the whole year again. The date is ``YYYY-MM-DD``; a full timestamp is
+    truncated to its date part.
     """
     titles = (journal,) if isinstance(journal, str) else tuple(journal)
     if len(titles) == 1:
         journal_clause = f'JOURNAL:"{titles[0]}"'
     else:
         journal_clause = "(" + " OR ".join(f'JOURNAL:"{t}"' for t in titles) + ")"
-    return (
+    query = (
         f'{journal_clause} AND FIRST_PDATE:[{year}-01-01 TO {year}-12-31] '
         f'AND (PUB_TYPE:"journal article" OR PUB_TYPE:"research article")'
     )
+    since_date = (since or "").strip()[:10]
+    if since_date:
+        query += f' AND CREATION_DATE:[{since_date} TO 2999-12-31]'
+    return query
 
 
 def _clean_abstract(value: Any) -> str | None:
@@ -287,7 +299,8 @@ class EpmcProvider:
         return response.json()
 
     # -- harvesting --------------------------------------------------------
-    def _query(self, year: int, *, has_abstract_only: bool = True) -> str:
+    def _query(self, year: int, *, has_abstract_only: bool = True,
+               since: str | None = None) -> str:
         """The query for one journal-year, with the abstract filter applied.
 
         The whole family is queried, not just the flagship: Europe PMC
@@ -295,13 +308,14 @@ class EpmcProvider:
         misses the specials -- which is where the majority of The Lancet's
         papers live.
         """
-        query = epmc_query(self.journals, year)
+        query = epmc_query(self.journals, year, since=since)
         if has_abstract_only:
             query += " AND HAS_ABSTRACT:Y"
         return query
 
     def iter_year(self, year: int, *, limit: int | None = None,
-                  has_abstract_only: bool = True) -> Iterator[dict[str, Any]]:
+                  has_abstract_only: bool = True,
+                  since: str | None = None) -> Iterator[dict[str, Any]]:
         """Yield the normalised records of one journal-year.
 
         Paging uses Europe PMC's ``cursorMark``: it is the service's own
@@ -314,9 +328,14 @@ class EpmcProvider:
         16,688 -> 16,617, Cell Reports 1,376 -> 1,374, IEEE TPAMI 753 -> 753.
         The filter costs nothing where the abstracts are there, and it
         removes a large tail of editorial matter where they are not.
+
+        ``since`` asks only for the records Europe PMC created after that
+        date: the incremental form, the same idea as OpenAlex's
+        ``from_created_date``.
         """
         params: dict[str, Any] = {
-            "query": self._query(year, has_abstract_only=has_abstract_only),
+            "query": self._query(year, has_abstract_only=has_abstract_only,
+                                 since=since),
             "format": "json",
             "resultType": "core",
             "pageSize": PAGE_SIZE,
@@ -358,10 +377,12 @@ class EpmcProvider:
                 time.sleep(self.sleep)
 
     def list_year(self, year: int, *, limit: int | None = None,
-                  has_abstract_only: bool = True) -> list[dict[str, Any]]:
+                  has_abstract_only: bool = True,
+                  since: str | None = None) -> list[dict[str, Any]]:
         """All the records of one journal-year."""
         return list(self.iter_year(year, limit=limit,
-                                   has_abstract_only=has_abstract_only))
+                                   has_abstract_only=has_abstract_only,
+                                   since=since))
 
     # -- normalisation -----------------------------------------------------
     def normalize(self, record: dict[str, Any], year: int) -> dict[str, Any] | None:

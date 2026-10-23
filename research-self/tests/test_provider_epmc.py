@@ -199,3 +199,39 @@ class TestAbstractFilter:
         monkeypatch.setattr(provider, "_get", fake_get)
         provider.list_year(2024, has_abstract_only=False)
         assert "HAS_ABSTRACT" not in seen["query"]
+
+
+class TestIncremental:
+    """The incremental form asks only for what Europe PMC created since."""
+
+    def test_a_since_date_reaches_the_query(self):
+        query = epmc_query("Nature", 2024, since="2026-01-02")
+        assert "CREATION_DATE" in query
+        assert "2026-01-02" in query
+
+    def test_a_full_timestamp_is_truncated_to_its_date(self):
+        query = epmc_query("Nature", 2024, since="2026-01-02T13:45:00Z")
+        assert "2026-01-02" in query
+        assert "13:45" not in query
+
+    def test_without_a_since_the_query_carries_no_creation_filter(self):
+        assert "CREATION_DATE" not in epmc_query("Nature", 2024)
+
+    def test_the_filter_reaches_the_request(self, monkeypatch):
+        provider = EpmcProvider("bmj")
+        seen = {}
+
+        def fake_get(params):
+            seen.update(params)
+            return {"resultList": {"result": []}}
+
+        monkeypatch.setattr(provider, "_get", fake_get)
+        provider.list_year(2024, since="2026-01-02")
+        assert "CREATION_DATE" in seen["query"]
+        assert "2026-01-02" in seen["query"]
+
+    def test_the_year_window_is_kept_alongside_the_creation_filter(self):
+        query = epmc_query("Nature", 2024, since="2026-01-02")
+        # The publication window still bounds the year; the creation filter
+        # only narrows which records inside it are worth re-fetching.
+        assert "FIRST_PDATE:[2024-01-01 TO 2024-12-31]" in query
