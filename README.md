@@ -57,28 +57,111 @@ Three honest outcomes are reported separately rather than collapsing into one sc
 The Idea Finder used to rank with a single TF-IDF/SVD channel, which fails
 predictably: an acronym like **SECI** is not in the 1024-word SVD vocabulary, so
 the query vector was zero and the search collapsed to a keyword fallback with one
-0.00-scored row. Search is now three channels fused by **Reciprocal Rank
-Fusion** (rank-based, so cosine and BM25 need no score calibration):
+0.00-scored row. Search is now four channels fused by **Reciprocal Rank
+Fusion** (rank-based, so cosine and BM25 need no score calibration), and the
+channels are weighted by how much they prove:
 
-1. **Semantic** — cosine in the fitted vector space (the main channel);
-2. **FTS lexical** — whole tokens *and* prefix tokens (`learn*` matches
-   "learning"; bm25-ranked; the OR has to be explicit, `"learn" learn*` would be
-   an implicit AND and match nothing);
-3. **Substring** — LIKE over titles and abstracts, the channel that finds
-   "Secilia-Cxy" and "baseCIL" for `SECI`.
+1. **Exact phrase** — the whole query inside a *title*. The strongest
+   possible evidence, and the channel that makes a title query work;
+2. **Dense semantic** — cosine in the static embedding space (below), the
+   main channel;
+3. **FTS lexical** — every query term, relaxing to the rarest ones, with
+   bm25 weighted 12× towards the title;
+4. **Substring** — LIKE over titles, the channel that finds "Secilia-Cxy"
+   and "baseCIL" for `SECI`.
 
-A query the vocabulary cannot see still answers through channels 2–3, and the
+A query the vocabulary cannot see still answers through channels 3–4, and the
 API adds two kinds of one-click refinements: **相近术语** (vocabulary terms close
 to the query spelling — `SECI` suggests `semi`, `social`, `series`…) and **相关词**
 (frequent words from the top hits, pseudo-relevance feedback). Clicking a chip
 re-runs the search with it.
 
-Measured on `SECI` (all years): 3 hits (the one real SECI paper, plus the two
-papers whose GitHub links contain the substring) plus 6 spelling suggestions —
-previously a single 0.00-scored row. Normal queries keep their semantic ranking;
-Chinese queries keep the term bridge.
+Measured on `SECI` (all years): the real SECI paper plus the papers whose
+GitHub links contain the substring, and spelling suggestions — previously a
+single 0.00-scored row.
 
 ![Idea Finder answering the SECI query with suggestions](docs/screenshots/idea-finder-seci.png)
+
+### What was wrong with retrieval, and what fixed it
+
+The retrieval was rebuilt against a benchmark with objective ground truth
+rather than by feel. Three measurements, none of which need a human to label
+anything: a paper searched **by its own title** must come back first; a
+venue-scoped query must reach its own venue's papers; and the top hits must
+contain the query's terms.
+
+| | before | after |
+|---|---:|---:|
+| a paper found by its own title, at rank 1 | **39%** | **100%** |
+| … MRR@10 | 0.479 | **1.000** |
+| venues returning **nothing** for a common query | **15 of 30** | **0 of 30** |
+| top 10 containing every query term | 80% | **98.3%** |
+
+**The venue scope was the worst of it.** The lexical channel took the
+globally best-matching papers first and filtered them by venue afterwards, so
+a venue-scoped query could only ever return papers that were already in the
+global top 60. With the query *graph neural network*, **PNAS (2,380 matching
+papers), Cell Reports (1,012) and TMLR (798) all returned nothing.** The
+scope now lives inside the query, so the limit applies to the right set.
+
+**Long titles were being truncated.** The expression was capped at eight
+terms, so *"Influence of person-organization fit on job satisfaction among
+pre-school teachers"* kept 8 of its 24 words and matched 40,000 papers
+instead of the one. Nothing is dropped now except function words, which match
+281,482 of the 288,262 papers and so carry no signal at all.
+
+**The terms were ORed.** "graph neural network" matched every paper
+containing "network" — 47,572 of them. Requiring all the terms gives 2,509,
+and the rare ones are dropped first when that is too strict.
+
+### Dense embeddings (model2vec)
+
+The semantic channel was a TF-IDF + truncated-SVD space: a bag of words
+compressed to 128 dimensions, which can rank a paper by the words it shares
+with the query and by nothing else. It is now a **static embedding** distilled
+from a sentence transformer
+([model2vec](https://github.com/MinishLab/model2vec), `potion-base-8M`),
+which is numpy-only at inference — no torch, no GPU — and stores the whole
+corpus in 256 dimensions.
+
+Measured with the query built from a paper's own abstract **with the title's
+words removed**, so only meaning can find it:
+
+| | rank 1 | top 10 | MRR |
+|---|---:|---:|---:|
+| TF-IDF + SVD-128 | 57.5% | 79.2% | 0.647 |
+| **static embedding (256-dim)** | **99.2%** | **100%** | **0.994** |
+
+And with the query's word swapped for a **synonym** — "mortality" against
+"death rate" — so the lexical channels have nothing to match either:
+
+| | rank 1 | top 10 | MRR |
+|---|---:|---:|---:|
+| TF-IDF + SVD-128 | 87.3% | 92.7% | 0.894 |
+| **static embedding** | **98.0%** | **99.3%** | **0.985** |
+
+Building the corpus vectors takes 150 s and stores them in
+`Data/graph/dense_vectors.npz`; the model itself is a build-time dependency
+and the project then runs entirely offline from its own files. Without
+`model2vec` installed, or without the index built, everything falls back to
+the TF-IDF/SVD vectors — nothing breaks, it is just less good:
+
+```powershell
+python -m paper_ingest.dense        # build the corpus embeddings
+```
+
+The same space builds the map, so its clusters follow topics rather than
+publishers: 37 of the 40 map regions are not dominated by a single venue,
+and they are labelled *genome · genetic · genomic*, *qubit · entanglement*,
+*95 ci · prevalence · odds*, *stem · single cell*, *cortex · cortical ·
+neurons*.
+
+### Searching by relevance
+
+The Papers page used to pass the raw query string into FTS and then sort the
+survivors by "recently updated", so a paper found by its own name could sit
+below papers that merely shared a word with it. There is now a **Relevance**
+sort, and it is the default when a query is typed.
 
 ## Map performance notes
 

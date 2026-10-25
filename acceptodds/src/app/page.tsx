@@ -18,14 +18,20 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
   // `year=all` is a string sentinel, not a year: pass it through untouched so the
   // explorer can query the whole corpus. Anything else resolves as before.
   const requestedYear = one(params.year);
+  const keyword = one(params.q) ?? '';
+  // A search is a search for something: when the reader typed a query, the
+  // results are ordered by how well they match, not by which paper happened
+  // to be updated last. An explicit `?sort=` still wins.
+  const requestedSort = one(params.sort);
+  const sort = requestedSort ?? (keyword ? 'relevance' : 'recent');
   return (
     <PaperExplorer
       venue={one(params.venue) ?? 'all'}
       year={isAllYears(requestedYear) ? ALL_YEARS : resolveYear(requestedYear, info)}
       yearInfo={info}
       status={one(params.status) ?? ''}
-      sort={one(params.sort) ?? 'recent'}
-      keyword={one(params.q) ?? ''}
+      sort={sort}
+      keyword={keyword}
       page={Number(one(params.page) ?? 1)}
     />
   );

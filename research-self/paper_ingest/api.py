@@ -704,7 +704,19 @@ def graph_minimap(paper_id:str,venue:str|None=None,year:str|None=None):
         cluster_ids={p["cluster"] for p in points if p["cluster"] is not None}
         labels=[]
         if cluster_ids:
-            labels=[dict(r) for r in con.execute("SELECT number,label FROM graph_topics WHERE venue_id=? AND level='cluster'",(venue or "",))]
+            # The topics belong to a venue-year: two years of the same venue
+            # have different layouts and different labels. Without the year
+            # the query would return one set per year, with colliding cluster
+            # numbers.
+            if years.is_all(year):
+                labels=[dict(r) for r in con.execute(
+                    "SELECT number,label FROM graph_topics WHERE venue_id=? AND level='cluster' "
+                    "AND year=(SELECT MAX(year) FROM graph_topics WHERE venue_id=? AND level='cluster')",
+                    (venue or "", venue or ""))]
+            else:
+                labels=[dict(r) for r in con.execute(
+                    "SELECT number,label FROM graph_topics WHERE venue_id=? AND level='cluster' AND year=?",
+                    (venue or "", years.resolve(year)))]
     return {"points":points,"vectors":vectors if all(v is not None for v in vectors) else None,
             "self":local[paper_id],"related":[local[all_data["slugs"][i]] for i in related if all_data["slugs"][i] in local],
             "relatedElsewhere":0,"edges":edges,"clusters":labels}

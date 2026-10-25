@@ -16,8 +16,14 @@ from . import db
 from .config import DATA_ROOT, venues
 from .openreview import OpenReview, normalize, raw_path, write_raw
 from . import manifest
+from . import retrieval
 from . import semantics
 from . import years
+
+#: How many papers a relevance-ordered search ranks. A paper list is paged,
+#: so the window only has to be deep enough to fill the pages a reader will
+#: actually scroll; 2,000 covers the 40-per-page list fifty pages deep.
+RELEVANCE_LIMIT = 2000
 
 
 def venue_id(key: str, config: dict[str, Any], year: int) -> str:
@@ -313,9 +319,22 @@ def list_papers(*, venue: str | None = None, year: int | str | None = None, keyw
     if status:
         clauses.append("p.status=?"); args.append(status)
     join = ""
+    relevance_ids: list[str] = []
     if keyword:
-        clauses.append("p.id IN (SELECT paper_id FROM papers_fts WHERE papers_fts MATCH ?)")
-        args.append(keyword.replace('"',''))
+        if sort == "relevance":
+            # Rank by lexical evidence and show that order. The alternative --
+            # the raw query string as an FTS expression -- cannot match a
+            # prefix ("learn" finds nothing for "learning"), cannot drop the
+            # function words a title is full of, and then sorts the survivors
+            # by "recently updated", so the paper the user asked for by name
+            # could sit below papers that merely share a word with it.
+            with db.connect() as con:
+                relevance_ids = retrieval.lexical_ranking(
+                    con, keyword, limit=RELEVANCE_LIMIT,
+                    venue=venue, year=None if all_years else year)
+        else:
+            clauses.append("p.id IN (SELECT paper_id FROM papers_fts WHERE papers_fts MATCH ?)")
+            args.append(keyword.replace('"',''))
     # With `year=all` and no venue every predicate is optional, which leaves the
     # clause list empty; emitting a bare "WHERE" there is a syntax error.
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
@@ -324,6 +343,22 @@ def list_papers(*, venue: str | None = None, year: int | str | None = None, keyw
     # multiple years; the JOIN form already returns one row per paper.
     distinct = "DISTINCT " if not drive_join else ""
     with db.connect() as con:
+        if relevance_ids:
+            # The ranked ids are the whole result set, in order. json_each turns
+            # the list into a join, so the order survives into SQL: 2,000 ids
+            # in 4 ms, and no "ORDER BY CASE" the planner would have to chew.
+            blob = json.dumps(relevance_ids)
+            total = len(relevance_ids)
+            rows = con.execute(
+                "SELECT p.* FROM papers p JOIN json_each(?) j ON j.value=p.id "
+                "ORDER BY j.key LIMIT ? OFFSET ?",
+                (blob, page_size, (page - 1) * page_size)).fetchall()
+            output=[]
+            for row in rows:
+                item=db.paper_dict(row)
+                item["venues"]=[dict(v) for v in con.execute("SELECT v.id,v.name,pv.year,pv.relation_type FROM paper_venues pv JOIN venues v ON v.id=pv.venue_id AND v.year=pv.year WHERE pv.paper_id=? ORDER BY pv.year DESC,v.name",(item["id"],)).fetchall()]
+                output.append(item)
+            return {"items":output,"total":total,"page":page,"page_size":page_size,"pages":max(1,(total+page_size-1)//page_size)}
         total = con.execute("SELECT count(" + distinct + "p.id) FROM papers p"+drive_join+join+where,args).fetchone()[0]
         rows = con.execute("SELECT "+distinct+"p.* FROM papers p"+drive_join+join+where+f" ORDER BY {order} LIMIT ? OFFSET ?",args+[page_size,(page-1)*page_size]).fetchall()
         output=[]

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { ALL_YEARS, yearLabel, yearSelectValues, type YearInfo } from '@/lib/years';
 import { groupedVenues } from '@/lib/venues';
+import { SortSelect } from './SortSelect';
 
 type Item = {
   id: string;
@@ -118,11 +119,16 @@ export async function PaperExplorer({
             </option>
           ))}
         </select>
-        <select aria-label="Sort" name="sort" defaultValue={sort} className="border border-frame bg-card px-3 py-2">
-          <option value="recent">Recently updated</option>
-          <option value="title">Title</option>
-          <option value="year">Year</option>
-        </select>
+        <SortSelect
+          value={sort}
+          fallback={keyword ? 'relevance' : 'recent'}
+          options={[
+            { value: 'relevance', label: 'Relevance' },
+            { value: 'recent', label: 'Recently updated' },
+            { value: 'title', label: 'Title' },
+            { value: 'year', label: 'Year' },
+          ]}
+        />
         <button className="border border-ink bg-ink px-5 py-2 text-white" type="submit">
           Search
         </button>
