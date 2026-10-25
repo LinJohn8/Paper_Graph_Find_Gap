@@ -408,8 +408,27 @@ def graph(venue: str | None = None, year: int | str | None = None, *,
         topics={"region":[],"cluster":[]}
         if topic_venue:
             for level in topics:
-                records=con.execute("SELECT DISTINCT number,label FROM graph_topics WHERE venue_id=? AND level=? ORDER BY number",(topic_venue,level))
-                topics[level]=[dict(r) for r in records]
+                # The topics belong to a venue-year: two years of the same
+                # venue have different fitted layouts and different labels.
+                # The all-years map uses the globally fitted layout, which has
+                # no single year, so it takes any of the venue's topic sets.
+                if all_years:
+                    # The all-years map uses the globally fitted layout, which
+                    # has no single year, so it takes the most recent year that
+                    # has topics for this venue -- not a mixture of years,
+                    # whose cluster numbers would collide.
+                    records = con.execute(
+                        "SELECT number,label FROM graph_topics "
+                        "WHERE venue_id=? AND level=? AND year=("
+                        "  SELECT MAX(year) FROM graph_topics "
+                        "  WHERE venue_id=? AND level=?) ORDER BY number",
+                        (topic_venue, level, topic_venue, level))
+                else:
+                    records = con.execute(
+                        "SELECT DISTINCT number,label FROM graph_topics "
+                        "WHERE venue_id=? AND level=? AND year=? ORDER BY number",
+                        (topic_venue, level, year))
+                topics[level] = [dict(r) for r in records]
     payload: dict[str, Any] = {
         "kind": venue or "all",
         "slugs":[r["id"] for r in rows],
@@ -764,21 +783,28 @@ def generate_graph(venue: str, year: int | None = None) -> dict[str, Any]:
 
     clusters = sorted(int(c) for c in np.unique(labels))
     with db.connect() as con:
-        con.execute("DELETE FROM graph_topics WHERE venue_id=?", (venue,))
+        # Only this venue-year's rows are replaced. The topics carry the year
+        # too, because two years of a venue have genuinely different topics.
+        con.execute("DELETE FROM graph_topics WHERE venue_id=? AND year=?", (venue, year))
+        # Stale points of this venue-year are cleared first: a rebuild that
+        # found fewer papers must not leave the old ones on the map.
+        con.execute("DELETE FROM graph_points WHERE venue_id=? AND year=?", (venue, year))
         for c in clusters:
             label = (topic_labels.get(c) or "").strip() or _fallback_label(c)
-            con.execute("INSERT INTO graph_topics(venue_id,level,number,label) VALUES(?,?,?,?)",
-                        (venue, "cluster", c, label))
-            con.execute("INSERT INTO graph_topics(venue_id,level,number,label) VALUES(?,?,?,?)",
-                        (venue, "region", c, label))
+            con.execute("INSERT INTO graph_topics(venue_id,year,level,number,label) VALUES(?,?,?,?,?)",
+                        (venue, year, "cluster", c, label))
+            con.execute("INSERT INTO graph_topics(venue_id,year,level,number,label) VALUES(?,?,?,?,?)",
+                        (venue, year, "region", c, label))
         for i, r in enumerate(rows):
             vector = json.dumps(vectors[i].astype(float).tolist()) if vectors is not None else None
             con.execute(
-                "INSERT INTO graph_points(paper_id,venue_id,x,y,region,cluster,vector_json) VALUES(?,?,?,?,?,?,?) "
+                "INSERT INTO graph_points(paper_id,venue_id,x,y,region,cluster,vector_json,year) "
+                "VALUES(?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(paper_id) DO UPDATE SET venue_id=excluded.venue_id,x=excluded.x,y=excluded.y,"
-                "region=excluded.region,cluster=excluded.cluster,vector_json=excluded.vector_json",
+                "region=excluded.region,cluster=excluded.cluster,vector_json=excluded.vector_json,"
+                "year=excluded.year",
                 (r["id"], venue, float(coords[i, 0]), float(coords[i, 1]),
-                 int(labels[i]), int(labels[i]), vector),
+                 int(labels[i]), int(labels[i]), vector, int(year)),
             )
         # Similarity is stored as a provenance-labelled relation; no topic model is implied.
         # Exactly the 10 strongest neighbours per paper, replacing any stale rows

@@ -187,6 +187,19 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--epmc-workers", type=int, default=8)
     plan.add_argument("--mailto", default=None)
     plan.add_argument("--api-key", default=None)
+    plan.add_argument("--no-layout", action="store_true",
+                      help="skip building the map layout for new venue-years")
+
+    # -- map layouts ---------------------------------------------------------
+    layouts = sub.add_parser(
+        "layouts",
+        help="build the map layout for every venue-year that has none")
+    layouts.add_argument("--venue", default="all",
+                         help="a venue key, or 'all'")
+    layouts.add_argument("--from-year", type=int, default=2022)
+    layouts.add_argument("--to-year", type=int, default=2026)
+    layouts.add_argument("--force", action="store_true",
+                         help="rebuild even venue-years that already have a layout")
 
     return parser
 
@@ -379,6 +392,54 @@ def _cmd_build_graph(args: argparse.Namespace) -> dict[str, Any]:
     return generate_graph(args.venue, args.year)
 
 
+def _cmd_layouts(args: argparse.Namespace) -> dict[str, Any]:
+    """Build the map layout for the venue-years that have none.
+
+    ONE LAYOUT PER VENUE-YEAR
+    -------------------------
+    ``graph_points`` carries the year of the layout, and the papers of two
+    years of a venue are disjoint (measured: 0 papers belong to more than one
+    venue-year), so each venue-year keeps its own map. Before this, a venue
+    had exactly one layout: building icml 2025 erased icml 2024's points,
+    and 25 of 30 venues showed an **empty map** for four of their five
+    years.
+
+    Measured cost is roughly linear in papers -- 61 papers 2.1 s, 1,803
+    papers 12 s, 18,221 papers 140 s.
+    """
+    from .service import generate_graph
+
+    keys = None if args.venue == "all" else [args.venue]
+    with db.connect() as con:
+        rows = con.execute(
+            "SELECT pv.venue_id, pv.year, count(DISTINCT pv.paper_id) n "
+            "FROM paper_venues pv WHERE pv.year BETWEEN ? AND ? "
+            "GROUP BY 1,2 HAVING n > 0", (args.from_year, args.to_year)).fetchall()
+        have = {(r["venue_id"], r["year"]) for r in con.execute(
+            "SELECT DISTINCT venue_id, year FROM graph_points WHERE year > 0")}
+
+    targets: list[tuple[str, int, int]] = []
+    for row in rows:
+        venue, year, n = row["venue_id"], row["year"], row["n"]
+        if keys is not None and venue not in keys:
+            continue
+        if not args.force and (venue, year) in have:
+            continue
+        targets.append((venue, year, n))
+
+    results: list[dict[str, Any]] = []
+    for venue, year, _n in sorted(targets, key=lambda t: t[2]):
+        try:
+            results.append({"venue": venue, "year": year,
+                            **generate_graph(venue, year)})
+        except Exception as exc:  # noqa: BLE001 - one venue must not stop the batch
+            results.append({"venue": venue, "year": year, "status": "failed",
+                            "error": f"{type(exc).__name__}: {exc}"})
+    return {"built": sum(1 for r in results if r.get("status") == "generated"),
+            "failed": sum(1 for r in results if r.get("status") == "failed"),
+            "results": results}
+
+
 def _cmd_enrich_abstracts(args: argparse.Namespace) -> dict[str, Any]:
     from .official import enrich_missing_abstracts
 
@@ -394,11 +455,19 @@ def _cmd_prune_abstractless(args: argparse.Namespace) -> dict[str, Any]:
 def _cmd_harvest(args: argparse.Namespace) -> dict[str, Any]:
     """The plan: journals, then the abstract backfill, then the audit.
 
-    A plan exists because the three steps have a real order and a real
+    A plan exists because the steps have a real order and a real
     dependency: the harvest brings the records, the backfill brings their
     abstracts, and the audit says whether the result is complete. Running
     them by hand in the wrong order is how a corpus ends up with titles but
     no abstracts.
+
+    The plan also builds the map layout, and that step is not optional
+    bookkeeping: a venue whose layout was never generated shows an empty
+    map. graph_points is keyed by paper_id and carries venue_id, so it holds
+    one layout per *venue*; after the journal harvest every journal year
+    rendered nothing until its layout existed. Measured cost is ~12 s for a
+    1,477-paper year and ~100 s for an 11,711-paper one, so ``--no-layout``
+    skips it when only the data matters.
     """
     steps: list[dict[str, Any]] = []
     if not args.skip_journals:
@@ -415,8 +484,52 @@ def _cmd_harvest(args: argparse.Namespace) -> dict[str, Any]:
                               **backfill_journal_abstracts(
                                   key, year, limit=args.limit,
                                   workers=args.workers, epmc_workers=args.epmc_workers)})
+
+    if not getattr(args, "no_layout", False):
+        steps.extend(_build_missing_layouts(
+            _journal_keys(args.venue),
+            from_year=args.from_year, to_year=args.to_year))
+
     coverage = _cmd_coverage(args)
     return {"steps": steps, "coverage": coverage}
+
+
+def _build_missing_layouts(venue_keys: list[str], *, from_year: int,
+                           to_year: int) -> list[dict[str, Any]]:
+    """Build the map layout for any venue-year in scope that has none.
+
+    graph_points carries the year of the layout, and the papers of two years
+    of a venue are disjoint, so each venue-year keeps its own map. A venue
+    whose layout was never generated renders an empty map, and after the
+    journal harvest every journal year rendered nothing until its layout
+    existed.
+    """
+    from .service import generate_graph
+
+    with db.connect() as con:
+        rows = con.execute(
+            """SELECT pv.venue_id, pv.year, count(DISTINCT pv.paper_id) n
+               FROM paper_venues pv
+               WHERE pv.year BETWEEN ? AND ?
+                 AND NOT EXISTS (SELECT 1 FROM graph_points g
+                                 WHERE g.venue_id=pv.venue_id AND g.year=pv.year)
+               GROUP BY 1,2 HAVING n > 0""",
+            (from_year, to_year)).fetchall()
+
+    wanted = set(venue_keys) if venue_keys else None
+    out: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda r: r["n"]):
+        venue, year = row["venue_id"], row["year"]
+        if wanted is not None and venue not in wanted:
+            continue
+        try:
+            out.append({"step": "layout", "venue": venue, "year": year,
+                        **generate_graph(venue, year)})
+        except Exception as exc:  # noqa: BLE001 - one venue must not stop the plan
+            out.append({"step": "layout", "venue": venue, "year": year,
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}"})
+    return out
 
 
 #: Command name -> implementation.
@@ -433,6 +546,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace], Any]] = {
     "coverage": _cmd_coverage,
     "graph": _cmd_graph,
     "build-graph": _cmd_build_graph,
+    "layouts": _cmd_layouts,
     "enrich-abstracts": _cmd_enrich_abstracts,
     "prune-abstractless": _cmd_prune_abstractless,
     "harvest": _cmd_harvest,

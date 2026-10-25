@@ -91,11 +91,16 @@ def init_db(path: Path | None = None) -> None:
         );
         CREATE TABLE IF NOT EXISTS graph_points (
           paper_id TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
-          venue_id TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, region INTEGER, cluster INTEGER, vector_json TEXT
+          venue_id TEXT NOT NULL, x REAL NOT NULL, y REAL NOT NULL, region INTEGER, cluster INTEGER, vector_json TEXT,
+          -- The year of the layout. Each venue-year has its own map: the
+          -- papers of two years of a venue are disjoint, so they can share
+          -- the paper_id key, and the year only has to be recorded.
+          year INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS graph_topics (
-          venue_id TEXT NOT NULL, level TEXT NOT NULL, number INTEGER NOT NULL, label TEXT NOT NULL,
-          PRIMARY KEY(venue_id, level, number)
+          venue_id TEXT NOT NULL, year INTEGER NOT NULL DEFAULT 0,
+          level TEXT NOT NULL, number INTEGER NOT NULL, label TEXT NOT NULL,
+          PRIMARY KEY(venue_id, year, level, number)
         );
         CREATE TABLE IF NOT EXISTS sync_jobs (
           id INTEGER PRIMARY KEY AUTOINCREMENT, venue TEXT NOT NULL, year INTEGER NOT NULL, provider TEXT NOT NULL,
@@ -145,7 +150,26 @@ def init_db(path: Path | None = None) -> None:
         -- ``reviews.paper_id`` is the same story on a smaller table: it is a
         -- foreign key with ON DELETE CASCADE and no index of its own.
         CREATE INDEX IF NOT EXISTS reviews_paper_idx ON reviews(paper_id);
+        -- ``graph_points(venue_id, year)`` -- the layout table is keyed by
+        -- ``paper_id``, so ``venue_id`` had no index of its own. Every query
+        -- of the form "which venue-years have no layout yet?" is
+        --
+        --     NOT EXISTS (SELECT 1 FROM graph_points g
+        --                   WHERE g.venue_id = pv.venue_id AND g.year = pv.year)
+        --
+        -- which SQLite answered by scanning the whole layout table once per
+        -- ``paper_venues`` row: 288k rows x 75k rows, and the query did not
+        -- finish in ten minutes.
+        --
+        -- The index covers BOTH columns because the year is part of the
+        -- lookup: an index on ``venue_id`` alone still had to read every one
+        -- of a venue's 18,221 rows to test the year, and the same query was
+        -- still slow (over ten minutes). With (venue_id, year) the
+        -- ``NOT EXISTS`` is one index probe per row.
+        CREATE INDEX IF NOT EXISTS graph_points_venue_year_idx
+          ON graph_points(venue_id, year);
         """)
+        _ensure_layout_year_columns(con)
         _ensure_sync_job_coverage_columns(con)
         # Phase 1 accidentally added UNIQUE(id), preventing the configured
         # registry from retaining more than one year. Rebuild only that small
@@ -172,6 +196,50 @@ def init_db(path: Path | None = None) -> None:
             con.execute("DROP TABLE venues_legacy")
             con.execute("PRAGMA foreign_keys=ON")
         _align_fts_rowids(con)
+
+
+def _ensure_layout_year_columns(con: sqlite3.Connection) -> None:
+    """Give the layout tables a year, so each venue-year keeps its own map.
+
+    WHY
+    ---
+    ``graph_points`` was keyed by ``paper_id`` alone and ``graph_topics`` by
+    ``(venue_id, level, number)``, so a venue had exactly ONE layout: building
+    icml 2025 erased icml 2024's points, and building any later year of a
+    journal replaced the year the map had been showing. Measured on the
+    288k corpus: every venue has 4-5 years, and 25 of 30 venues showed an
+    **empty map** for four of them.
+
+    The papers of two years of a venue are disjoint (measured: 0 papers
+    belong to more than one venue-year), so the ``paper_id`` key does not
+    collide across years -- the year only has to be RECORDED, not keyed.
+    ``graph_topics`` does need its key widened, because two years of a venue
+    genuinely carry different topic labels.
+
+    ``CREATE TABLE IF NOT EXISTS`` never widens an existing table, so both
+    are migrated in place: a guarded ``ALTER TABLE`` for the column, and a
+    rebuild of the small ``graph_topics`` table for the key. ``year`` defaults
+    to 0 for rows written before the migration.
+    """
+    columns = {row[1] for row in con.execute("PRAGMA table_info('graph_points')")}
+    if "year" not in columns:
+        con.execute("ALTER TABLE graph_points ADD COLUMN year INTEGER NOT NULL DEFAULT 0")
+
+    topic_columns = {row[1] for row in con.execute("PRAGMA table_info('graph_topics')")}
+    if "year" in topic_columns:
+        return
+    # The topic table is small (922 rows), so it is rebuilt rather than
+    # migrated key by key.
+    con.execute("ALTER TABLE graph_topics RENAME TO graph_topics_old")
+    con.execute(
+        "CREATE TABLE graph_topics ("
+        "  venue_id TEXT NOT NULL, year INTEGER NOT NULL DEFAULT 0,"
+        "  level TEXT NOT NULL, number INTEGER NOT NULL, label TEXT NOT NULL,"
+        "  PRIMARY KEY(venue_id, year, level, number))")
+    con.execute(
+        "INSERT INTO graph_topics(venue_id, year, level, number, label) "
+        "SELECT venue_id, 0, level, number, label FROM graph_topics_old")
+    con.execute("DROP TABLE graph_topics_old")
 
 
 def _ensure_sync_job_coverage_columns(con: sqlite3.Connection) -> None:

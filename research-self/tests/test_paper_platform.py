@@ -13,7 +13,7 @@ def populate(path):
         for i in range(3):
             paper={'id':f'test-{i}','source':'test-fixture','source_paper_id':str(i),'title':f'[TEST FIXTURE] Graph retrieval {i}', 'abstract':'Fixture only; not a real academic paper.', 'authors':['Fixture Author'], 'keywords':['retrieval'], 'submission_year':2027,'status':'accepted' if i == 0 else 'submitted'}
             db.upsert_paper(con,paper,'cvpr' if i == 2 else 'iclr',2027)
-            con.execute('INSERT OR IGNORE INTO graph_points VALUES(?,?,?,?,?,?,?)',(paper['id'],'cvpr' if i == 2 else 'iclr',0.2+i*0.3,0.2+i*0.2,0,0,'[1,0,0]'))
+            con.execute('INSERT OR IGNORE INTO graph_points(paper_id,venue_id,x,y,region,cluster,vector_json,year) VALUES(?,?,?,?,?,?,?,?)',(paper['id'],'cvpr' if i == 2 else 'iclr',0.2+i*0.3,0.2+i*0.2,0,0,'[1,0,0]',2027))
         con.execute("INSERT OR IGNORE INTO paper_relations VALUES('test-0','test-1','similar',0.9,'test-fixture')")
         for visibility in ('public','private'):
             con.execute('INSERT OR IGNORE INTO reviews(id,paper_id,source_review_id,review_type,content,visibility) VALUES(?,?,?,?,?,?)',(visibility,'test-0',visibility,'official_review','[TEST FIXTURE] Review',visibility))
