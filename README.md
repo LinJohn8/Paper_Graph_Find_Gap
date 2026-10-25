@@ -4,35 +4,29 @@ Paper Graph is a local, login-free academic paper browser. It stores source meta
 
 ## Screenshots
 
-Papers page — the UI opens on the newest year that actually has data, and the Year control offers **All years** to browse the whole corpus at once. The 2022–2026 corpus holds **288,261 papers** (5 conferences + 25 journals):
+Papers page — the UI opens on the newest year that actually has data, and the Year control offers **All years** to browse the whole corpus at once. The 2022–2026 corpus holds **288,262 papers** (5 conferences + 25 journals):
 
-> The screenshots below were taken while the corpus held 73,675 papers, before
-> the journal harvest that took it to 288,261. The UI is unchanged; only the
-> counts in the images are smaller than today's.
-
-![Papers page showing 20,412 papers for 2026](docs/screenshots/papers-2026.png)
-
-![Papers page showing all 73,675 papers across all years](docs/screenshots/papers-all-years.png)
+![Papers page showing the 2026 papers](docs/screenshots/papers-2026-59k.png)
 
 Paper map — one semantic coordinate per paper (TF-IDF/SVD + t-SNE neighbourhood projection + KMeans), rebuilt for every venue-year:
 
-![Paper map for 2026 with 20,412 points](docs/screenshots/map-2026.png)
+![Paper map for 2026 across all venues](docs/screenshots/map-2026-journals.png)
 
-Paper map with **All years**: the whole corpus in one globally fitted semantic space (PCA-2 over a single TF-IDF/SVD model fitted on the whole corpus — per-venue-year layouts live in separate SVD bases and cannot be overlaid):
+A single journal year, which used to render an **empty canvas** until each venue-year got its own layout:
 
-![Whole-corpus paper map with 73,675 points](docs/screenshots/map-all-years.png)
+![PLOS ONE 2024 with 16,616 points and its topic labels](docs/screenshots/map-plosone-2024.png)
 
-Data Sources — per-venue, per-year local paper counts and last sync status:
+Data Sources — per-venue, per-year local paper counts, last sync status and the coverage verdict:
 
-![Data Sources page with every venue-year count](docs/screenshots/data-sources.png)
+![Data Sources page with every venue-year count and coverage](docs/screenshots/sources-coverage.png)
 
 Paper detail — abstract, extracted research questions, stated gaps and related papers:
 
 ![Paper detail page](docs/screenshots/paper-detail.png)
 
-Idea Finder — type an idea, get the most relevant papers across the whole corpus, tick the ones you want and copy them as Markdown links, titles, URLs or BibTeX:
+Idea Finder — type an idea, get the most relevant papers across the whole corpus, tick the ones you want and copy them as Markdown links, titles, URLs or BibTeX. Here the idea is *single-cell RNA sequencing for predicting cell state transitions*, and the top two hits come from **Cell 2026** and **PNAS 2026** — journals the Europe PMC collector added:
 
-![Idea Finder with ranked results and the copy toolbar](docs/screenshots/idea-finder.png)
+![Idea Finder answering a single-cell sequencing idea](docs/screenshots/idea-finder-singlecell.png)
 
 The same search in Chinese. Chinese academic terms are bridged to their English surface forms on the query side (`扩散模型` → `diffusion model`, `三维场景` → `3d scene`), so a Chinese question reaches the English corpus; the fitted model and stored vectors are untouched:
 
