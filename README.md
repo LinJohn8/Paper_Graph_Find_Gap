@@ -97,6 +97,55 @@ The map is usable at corpus scale because of four changes:
 
 Two slow endpoints (`/api/papers/semantic`, `/api/gaps`) are Next.js route handlers rather than `next.config` rewrites: the rewrite proxy closes the connection with `socket hang up` past ~30 s, while a cold semantic search or a gap scan legitimately takes 20–40 s.
 
+### One map per venue-year
+
+Choosing a journal and a year on the map page used to show an empty canvas:
+the corpus held the papers and the search found them, but the map answered
+with zero points. Two separate causes, and the second one hid the first.
+
+**The schema.** `graph_points` was keyed by `paper_id` and carried no year,
+so a venue had exactly **one** layout — building ICML 2025 erased ICML
+2024's points, and `graph_topics` was keyed by venue alone, so a year
+overwrote the previous year's topic labels. Every venue has 4–5 years, and
+**25 of 30 venues showed an empty map for four of them**.
+
+The papers of two years of a venue are disjoint (measured: 0 papers belong
+to more than one venue-year), so the `paper_id` key does not collide across
+years — the year only had to be *recorded*, not keyed. `graph_points` gained
+a `year` column and `graph_topics` a year in its key; both are migrated in
+place, so an existing database keeps its data.
+
+**The index.** Which venue-years still need a layout is asked as
+
+```sql
+NOT EXISTS (SELECT 1 FROM graph_points g
+            WHERE g.venue_id = pv.venue_id AND g.year = pv.year)
+```
+
+`graph_points` had no index on `venue_id`, so SQLite answered this by
+scanning the whole layout table once per `paper_venues` row — 288k rows ×
+75k rows. **The query did not finish in ten minutes.** With an index on
+`(venue_id, year)` it returns in **0.9 s**.
+
+The index covers both columns on purpose: an index on `venue_id` alone was
+the first attempt and the query was *still* slow, because the year then had
+to be read from every one of a venue's 18,221 rows. The test asserts the
+query plan, not just the schema, so an index that stops covering the year
+fails it.
+
+Measured after the fix:
+
+| | |
+|---|---|
+| venue-years, all built | 148 (2,238 s) |
+| venue-years serving a map | **148/148**, 12.4 s for all of them |
+| PLOS ONE 2024 in a browser | **16,616 papers**, no console errors |
+
+A venue-year without a layout renders an empty canvas, which reads as a
+broken page rather than an absent dataset, so the harvest plan now builds
+the layouts it needs (`--no-layout` skips it) and `paper_ingest layouts`
+builds whatever is missing.
+
 ## Data coverage (2022–2026)
 
 Every venue-year was rebuilt from the publishers' own indexes (ICLR virtual site, PMLR, NeurIPS Proceedings, ACL Anthology, CVF Open Access, jmlr.org for TMLR) and then deduplicated across sources. Journal papers come from OpenAlex (see the journal section below). Conference counts grow strictly year over year:
@@ -346,6 +395,9 @@ python -m paper_ingest jmlr --year 2024
 
 # Data hygiene: see what a prune would remove, then remove it.
 python -m paper_ingest prune-abstractless --source europepmc --dry-run
+
+# Build the map layout for any venue-year that has none.
+python -m paper_ingest layouts --venue all
 ```
 
 The watermark is stored per venue-year and only advances after a *successful*
