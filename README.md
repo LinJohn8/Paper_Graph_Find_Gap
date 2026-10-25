@@ -513,6 +513,10 @@ Manual development:
 cd F:\AIWork\paper_graph\research-self
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[test]"
+# optional: the dense semantic space (a better ranking; the search falls
+# back to the corpus's own TF-IDF/SVD vectors without it)
+pip install -e ".[dense]"
+python -m paper_ingest.dense          # build the corpus embeddings (once)
 python -m uvicorn paper_ingest.api:app --host 127.0.0.1 --port 8000
 # second terminal
 cd F:\AIWork\paper_graph\acceptodds
